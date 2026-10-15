@@ -1,7 +1,7 @@
 # Internship Experience Prep: Myntra & Atlassian
 
 > **Important.** The **Atlassian** section is reconstructed from the three resume bullets plus standard industry practice for SQS / Spring Boot systems. **Anything marked _(inferred)_ is a plausible design, not a known fact.** Before the interview, replace it with what you actually built, or be ready to say "I worked on X part; Y was owned by another team".
-> The **Myntra** section here is a resume-based summary. A fuller standalone Myntra file (`05_Myntra_Deep_Dive.md`) will be written from the Myntra context document.
+> The **Myntra** section is summarised here; the full version, verified against the internship report, is in `05_Myntra_Deep_Dive.md`.
 
 ---
 
@@ -138,46 +138,29 @@
 
 ---
 
-## Part B: Myntra, Software Engineer Intern, Product Detail Page (Jul–Dec 2025): resume-based summary
+## Part B: Myntra, Software Engineer Intern, Product-SizeFit team, PDP org (14 Jul – 5 Dec 2025)
 
-> The full version comes in `05_Myntra_Deep_Dive.md` after the Myntra context document is shared. Until then, this is what the resume supports.
+> **Full deep dive, verified against the internship report: `05_Myntra_Deep_Dive.md`.** This is the summary.
 
 ### B.1 One-paragraph pitch
-"On Myntra's Product Detail Page team, I worked in the Ratings & Reviews microservice. Related styles of a product, such as colour variants, had separate and often sparse ratings. I built a **Go + MySQL pipeline** that groups related styles, computes an **aggregated rating**, and synchronizes it across them for **5.7M+ products**. It uses **bulk APIs** to reduce round trips, **cache warm-up** so traffic doesn't hit a cold cache, **rate limiting** to protect MySQL and downstream services, and **error queues** for retries. I also optimized query and cache patterns, which cut **DB connections by 50%**, and I built a **production-parity stage environment** with MySQL, Aerospike and Kafka for safe pre-deployment testing."
+"On Myntra's Product Detail Page org, I worked on the **Ratings & Reviews microservice in Go**. Variants of the same product showed separate ratings; a new colour could show 'No Ratings' while the base product had thousands. I fixed both the read and write flows. They fetch related styles from **Accio** (the style-relationship service) in **bulk batches of 20**, cache the related set in **Aerospike** (7-day TTL), and write the aggregated rating to **every style in the cluster**. A **token-bucket rate limiter** (per pod) protects Accio, and rejected events go to a **Kafka error queue** for eventual consistency. I fixed a non-deterministic SQL bug caused by **Go's random map iteration order**. I merged **two queries into one** (50% fewer DB connections for the computation) and ran a **cache warmup for 5.7M styles** over 5 runs. Earlier, I onboarded the service onto a **production-like stage environment**: MySQL with mock data, Aerospike, Airbus and DB credentials in Vault."
 
-### B.2 Concepts to know (each is a likely probe)
+### B.2 Corrections to earlier guesses (the report is the source of truth)
 
-| Topic | What to say |
+| Topic | What actually happened |
 |---|---|
-| Aggregation math | Weighted mean: `Σ(avg_i × n_i) / Σ n_i`. Better: keep a **rating histogram** (count of 1–5 stars) per style, sum the histograms across the group, and compute the mean from that. That is exact and easy to update incrementally. |
-| Batch vs incremental | Full recompute (batch) for backfill; incremental updates on a new-review event (Kafka) for freshness. |
-| Bulk APIs | `GET /ratings?styleIds=1,2,...,100` instead of 100 calls. Fewer round trips and connections. Cap the batch size. |
-| Cache warm-up | Preload hot keys into Aerospike/cache before traffic arrives, to avoid a cold-start stampede on MySQL. |
-| Rate limiting | Token bucket in the pipeline (e.g., `golang.org/x/time/rate`) so a 5.7M-row job doesn't saturate MySQL or downstream services. |
-| Error queues | Failed style IDs go to a retry queue (possibly a Kafka topic) with retry count and backoff, then a DLQ. The pipeline never fails as a whole because of one bad item. |
-| 50% fewer DB connections | Batching (no N+1), cache-first reads, connection-pool tuning (`SetMaxOpenConns`, `SetMaxIdleConns`, `SetConnMaxLifetime`), reusing one `*sql.DB`. Claim only what you did. |
-| Aerospike | Distributed KV store; namespaces/sets/records/bins; SSD-optimized; sub-millisecond reads; TTL per record. |
-| Kafka | Used for review events and downstream sync. Partition by style ID to keep per-style ordering. |
-| Stage environment | Same service versions, configs and schemas as production, with real integrations (MySQL, Aerospike, Kafka, downstream mocks/stubs). It catches integration bugs before prod. |
-| Consistency | Aggregated ratings tolerate eventual consistency (minutes of lag are fine), which is why async plus caching is acceptable. |
+| **50% fewer DB connections** | Two CASE-based SQL queries (ratings, then review/image counts) merged into **one parameterised query**, with aggregation in Go. It was **not** connection-pool tuning. |
+| Aggregation | Histogram merge per cluster in Go, using a single map keyed by `(mainID << 32) \| rating` |
+| Related styles | Come from **Accio**, fetched in batches of 20 (recommended 20–25) |
+| Rate limiter | Token bucket from the team's existing framework, configurable per pod; started at 180 RPM per pod |
+| Error queue retries | Instant (no delay function was available in the Go services). A good "what I'd improve" point. |
+| Warmup | 5,710,991 styles; run 1 refreshed only 1.28M; pacing (4 ms between publishes) plus a rate-limit adjustment fixed it; 100% after 5 runs |
 
-### B.3 Likely questions
-1. Walk me through the ratings pipeline.
-2. Why average of averages is wrong (weighted mean / histogram).
-3. How did you run it for 5.7M products? (batching, concurrency with a worker pool of goroutines, rate limiting, checkpointing/resume)
-4. What if the job crashes halfway? (checkpoint the last processed ID, idempotent upserts, resume from the checkpoint)
-5. How do you keep cache and DB consistent? (cache-aside + invalidate on write / short TTL; warm-up after recompute)
-6. How did you measure the 50% drop in DB connections? (monitoring dashboards before vs after)
-7. Why Go for this? (cheap concurrency via goroutines, fast, already Myntra's service language)
-8. What's Aerospike and why not Redis? (Aerospike persists on SSD with RAM-like latency at large data sizes; it was the team's existing store)
-
-### B.4 STAR story: Myntra
-- **S:** Related product styles showed inconsistent, fragmented ratings across 5.7M+ products, and the service was heavy on DB connections under peak traffic.
-- **T:** Build a reliable aggregation and sync pipeline, and reduce DB load.
-- **A:** Go pipeline with bulk APIs, worker concurrency, rate limiting, cache warm-up and error/retry queues; query and cache access optimization; production-parity stage environment.
-- **R:** Consistent ratings across 5.7M+ products, 50% fewer DB connections, better stability under high traffic, and safer deployments.
-
----
+### B.3 STAR summary
+- **S:** Related product styles showed fragmented or missing ratings across 5.7M+ styles, and the cache never updated the related styles.
+- **T:** Automate consistent aggregated ratings without overloading Accio or MySQL.
+- **A:** Bulk Accio flow, related-set caching, a write-to-all-related-styles write flow, token-bucket rate limiting, a Kafka error queue, a SQL fix and merge (2 queries → 1), and an overnight 5.7M cache warmup.
+- **R:** 100% of styles refreshed, consistent ratings across variants, 50% fewer DB round trips for the computation, no manual intervention, and passing load and memory-leak tests.
 
 ## Part C: Behavioral stories mapped to common questions
 
@@ -186,8 +169,8 @@ Zomato's Round 1 is mostly DSA plus resume, but a few behavioral questions often
 | Question | Story to use | Key line |
 |---|---|---|
 | Tell me about a challenging technical problem | Myntra ratings pipeline at 5.7M scale | "The hard part wasn't the math, it was running it safely against production MySQL." |
-| A time you improved performance | Myntra 50% DB connections | Show before → change → after |
-| A time something failed / a bug in production | Pick a real one from Myntra or Atlassian | What broke, how you found it, the fix, what you changed so it can't recur |
+| A time you improved performance | Myntra: 2 CASE-based queries merged into 1 (50% fewer DB round trips); 5.7M cache warmup | Show before → change → after |
+| A time something failed / a bug | Myntra: warmup run 1 refreshed only 22% (rate limit), or the non-deterministic Go-map SQL bug (05, section 6) | What broke, how you found it, the fix, what you changed so it can't recur |
 | Working with ambiguity | Atlassian: automating a manual process with unclear requirements | You asked stakeholders, wrote a small design doc, and iterated |
 | Learning something fast | Go at Myntra / Kotlin at Atlassian | Productive within N weeks; how you learned (codebase reading, mentors) |
 | Teamwork / leadership | Hackathons (Hack-A-Sol win, iDEA top 10) | Your role, a disagreement, how it was resolved |

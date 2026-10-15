@@ -8,7 +8,7 @@
 | 2 | `02_Resume_and_Skills_Brief.md` | Self-intro scripts, line-by-line resume Q&A, every skill with priority, risky claims | Before every mock |
 | 3 | `03_Projects_TraceX_SupplySenseAI.md` | Code-verified architecture, algorithms, data models, weak spots and model answers for both projects | Days 4–7 |
 | 4 | `04_Experience_Myntra_Atlassian.md` | Atlassian SQS pipeline deep dive, Myntra summary, STAR stories | Days 1–4 |
-| 5 | `05_Myntra_Deep_Dive.md` | *Pending: needs the Myntra context document* | – |
+| 5 | `05_Myntra_Deep_Dive.md` | Verified from the internship report: stage onboarding, the aggregated-ratings design, SQL optimisation, the 5.7M cache warmup, Q&A and STAR stories | Days 1–3 |
 
 **Round 1 for an off-campus fresher (2024–26 reports):**
 1. A 20–40 minute deep dive into your resume and internships.

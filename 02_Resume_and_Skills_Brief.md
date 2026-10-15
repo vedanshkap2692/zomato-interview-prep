@@ -57,33 +57,39 @@
 | Why CSE / why software? | One honest line + one concrete moment (e.g., first time a system you built handled real users). |
 | Why Zomato and not an ML role, given all the ML on your resume? | "My internships were backend, and that's where I want to grow. ML is a tool I use in projects. At Zomato's scale, backend problems like dispatch, caching, ETA and search are where the impact is, and many of them use ML too." |
 
-### 2.2 Myntra: Software Engineer Intern, Product Detail Page (Jul–Dec 2025) **[P0]**
+### 2.2 Myntra: Software Engineer Intern, Product-SizeFit team, PDP (14 Jul – 5 Dec 2025) **[P0]**
 
-Full deep-dive is in `04_Experience_Myntra_Atlassian.md`. Summary of what to be ready for:
+The full deep dive, verified against the internship report, is in `05_Myntra_Deep_Dive.md`. This is the short version of each bullet.
 
-**Bullet 1: Aggregated ratings pipeline (Go + MySQL, bulk APIs, cache warm-up, rate limiting, error queues, 5.7M products)**
-- *What is a "style"?* At Myntra a style is one product listing (a style ID). Related styles are variants such as colours of the same design. Aggregating ratings means the same rating is shown on every variant.
-- *How did you decide which styles are related?* Answer from what was actually done at Myntra (see Myntra doc). A common approach is a grouping key (for example, a parent/article ID) stored in a mapping table.
-- *How is the aggregate computed?* Weighted average: `sum(rating_i × count_i) / sum(count_i)` over the related styles. **Never** average the averages. (This is a classic follow-up. Know why: a style with 2 ratings would weigh as much as one with 2,000.)
-- *Why bulk APIs?* Fewer network round trips. 5.7M items one call at a time would be too slow and would overload downstream services.
-- *Why cache warm-up?* Avoid a cold-cache stampede after deploy or recompute, when every request would miss and hit MySQL at once.
-- *Why rate limiting?* To protect MySQL and downstream services from the batch job's burst. Know **token bucket** vs **leaky bucket** vs **fixed/sliding window** (see Skills → System Design).
-- *Why an error queue?* Failed items are pushed to a retry/dead-letter queue instead of failing the whole batch. That gives retries with backoff and observability.
-- *Idempotency:* re-running the pipeline for the same style must give the same result. Writes are upserts keyed by style ID.
+**Bullet 1: Aggregated ratings pipeline (Go + MySQL, bulk APIs, cache warmup, rate limiting, error queues, 5.7M products)**
+- **Style:** a style ID is one version of a product, such as one colour. Related styles form a **cluster**. **Accio** is the internal source of truth for which styles are related.
+- **Problem:** the cache held per-style ratings, and a new rating updated only that one style.
+- **Fix:**
+  1. Fetch related styles from Accio in **batches of 20**.
+  2. Cache the related set in **Aerospike** (7-day TTL).
+  3. Recompute the cluster's aggregate and **write it to every related style**.
+- **Aggregate:** a histogram merge, summing per-star counts across the cluster, then a weighted average. **Never average the averages.**
+- **Rate limiting:** a **token bucket**, configurable per pod (started at 180 RPM per pod), on calls to Accio.
+- **Error queue:** a Kafka queue for events rejected by the limiter, giving eventual consistency. Retries were instant; backoff is a good "what I'd improve" point.
+- **Cache warmup:** **5,710,991 styles over 5 runs**. Run 1 refreshed only 1.28M. Adding a 4 ms pacing delay between publishes and adjusting the rate limit took it to 100%.
 
 **Bullet 2: Optimized queries and cache access, 50% fewer DB connections**
-- Expect: *"How did you measure 50%?"* → DB connection metrics / dashboards before vs after (Grafana or similar). Say what you actually used.
-- Expect: *"What did you change?"* Typical levers, of which you should claim only the ones you did:
-  - Batched queries (`WHERE id IN (...)`) instead of N+1 queries.
-  - Cache-aside reads: hit Aerospike/cache first, go to the DB only on a miss.
-  - Connection pool tuning (max open/idle connections, connection lifetime in Go's `database/sql`).
-  - Adding or using the right index.
-- Know: **N+1 query problem**, **connection pooling**, **cache-aside vs write-through vs write-back**, **cache invalidation**, **TTL**, **thundering herd**.
+- **What actually changed:** two SQL queries with hard-coded `CASE` style-to-group maps (one for ratings, one for review and image counts) became **one parameterised query**, with the aggregation moved into Go. That is **2 connections/round trips down to 1** for each aggregated-ratings computation.
+- **A bug fixed along the way:** the CASE clauses were generated from a **Go map, whose iteration order is random**. Because SQL `CASE` takes the first match, styles were non-deterministically grouped under the wrong main ID.
+- **The Go trick:** a single map keyed by `(mainID << 32) | rating`, instead of a map of maps.
+- **"50% of what?"** It's 50% fewer DB round trips for the aggregated-ratings computation. It is not a service-wide number, and it did not come from connection-pool tuning.
 
 **Bullet 3: Production-parity stage environment (Go, MySQL, Aerospike, Kafka, downstream services)**
-- *Why needed?* Bugs that only appear with real dependencies (Kafka consumers, Aerospike TTLs, schema differences) were escaping local testing.
-- *What does production parity mean?* The same service versions, configs, schemas and integrations as production, with test or anonymised data.
-- Know what **Aerospike** is: a distributed key-value NoSQL store, optimized for flash/SSD, with very low latency. It is used like Redis but persists at scale. Know what **Kafka** is: a distributed, partitioned, append-only log; producers, consumers, consumer groups, offsets.
+- **Before:** the service existed only in dev and production.
+- **What you did:**
+  1. Configured stage endpoints and timeouts for its dependencies.
+  2. Created the MySQL schema with mock data.
+  3. Sized and provisioned Aerospike.
+  4. Created DB read/write credentials and **Airbus** (event) credentials, stored in **Vault**.
+  5. Deployed, then validated via API calls and logs.
+- **Know these:**
+  - **Aerospike:** a distributed key-value store with the index in RAM and data on SSD.
+  - **Kafka:** a partitioned log, with consumer groups and offsets.
 
 ### 2.3 Atlassian: Software Engineer Intern, Marketplace (May–Jul 2025) **[P0]**
 
@@ -232,7 +238,7 @@ These lines invite probing. Have a crisp, honest answer for each.
 
 1. **"Kubernetes", "Kafka", "System Design" in Skills.** Expect "What's a consumer group?" or "What's a pod?". Revise section 3.4.
 2. **"Adversarial ML", "Computer Vision", "Transformers", "Generative AI".** Long ML list for an SDE role. If asked, tie each to a concrete project or course. If you can't, say "coursework-level exposure".
-3. **"5.7 million products" and "50% fewer DB connections".** Know how these were measured, over what period, and what the baseline was.
+3. **"5.7 million products" and "50% fewer DB connections".** 5.7M is the count of live styles refreshed in the cache warmup (5,710,991). The 50% is 2 queries/connections becoming 1 for each aggregated-ratings computation, not a service-wide figure.
 4. **"75% precision" (UAV landing).** Expect "Is 75% good enough for a drone?" Answer: it was a research prototype. In production you'd want a human-in-the-loop or a conservative threshold that trades recall for higher precision.
 5. **"99% transmission accuracy".** Expect "How measured?" (checksums / record counts).
 6. **Many languages (C, C++, Python, Java, Go, JS, Kotlin, PHP, TS, Dart).** Expect "Which is your strongest?" → **C++ for DSA, Go for backend**. Say this clearly at the start of coding rounds.
