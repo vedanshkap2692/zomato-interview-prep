@@ -1,199 +1,203 @@
 # Internships: Myntra and Atlassian
 
-> **Reading time:** about 25 minutes. Written for someone seeing this work for the first time; every technical word is explained where it first appears.
-> **Sources:** Myntra comes from Vaideeka's internship report, so the facts are verified; `05_Myntra_Deep_Dive.md` has the full detail. **Atlassian is reconstructed from the three resume bullets plus standard practice for this kind of system.** Anything marked *(check)* is a likely design, not a known fact — replace it with what was actually built, or say "that part was owned by another team".
+> About 25 minutes. Read it top to bottom; each part builds on the one before. Myntra facts come from Vaideeka's internship report (`05` has more detail). The Atlassian part is reconstructed from the resume bullets — anything marked *(check)* should be confirmed against what was actually built.
 
 ---
 
-# Part 1: Myntra — Software Engineer Intern, Product Detail Page (14 Jul – 5 Dec 2025)
+## Myntra (Jul – Dec 2025): Ratings & Reviews service
 
-## 1.1 Where you were
+### What the service is
 
-Myntra is a fashion e-commerce site. The **Product Detail Page (PDP)** is the page you see when you open one product. You were on the Product-SizeFit team, working on the **Ratings & Reviews microservice**, written in **Go**.
-- A **microservice** is a small, separate program that owns one job (here, ratings and reviews) and talks to other services over the network, instead of everything being one big application.
-- **Go** is a language from Google built for network services. It handles thousands of simultaneous tasks cheaply using *goroutines* (very lightweight threads).
+When you open a product on Myntra, that page (the Product Detail Page, PDP) is assembled from many small programs, each owning one job. One of them owns ratings and reviews. These small, independent programs are called **microservices**: each runs on its own and other services call it over the network — "give me the ratings for these product IDs". Vaideeka worked on the Ratings & Reviews microservice, written in **Go**, a language built for exactly this kind of network service.
 
-## 1.2 Project 1: a stage environment
+The service stores ratings in **MySQL**, a normal relational database (tables, rows, SQL). But databases are slowish and every product page needs ratings, so the service also keeps copies of ready-made answers in a **cache** — fast storage you check first. The cache here is **Aerospike**, a key-value store: you give it a key (a style ID), it gives back the value (that style's rating) in under a millisecond.
 
-Software usually runs in several **environments**: *dev* (for developers, often with fake dependencies), *stage* (a copy of production used for final testing) and *production* (what real users hit). The ratings service had only dev and production, so there was nowhere realistic to test a change before releasing it.
+Two cache words you'll use constantly:
+- **Cache hit / miss.** If the answer is in the cache, it's a hit and you return it. If not, it's a miss: you compute it from the database and store it in the cache for next time.
+- **TTL (time to live).** How long an entry stays before it's thrown away. Here it's 7 days. A TTL is a safety net — even if something goes wrong, a wrong value can't survive forever.
 
-You built its stage environment:
-1. Pointed it at the stage versions of every service it talks to, with credentials and **timeouts** (a limit on how long to wait for a reply, so one slow service can't freeze yours).
-2. Created the **MySQL** database (a relational database — data in tables, queried with SQL) with the same structure as production, filled with **mock data** (made-up, since real reviews are user data).
-3. Set up **Aerospike**, the cache. A **cache** is fast storage that keeps copies of frequently read data so you don't hit the slower database every time.
-4. Created the database and event-system credentials and stored them in **Vault**, a secrets manager, so passwords never sit in code.
-5. Deployed it and checked that the database and cache connections worked and the logs were clean.
+### The problem
 
-**Why it matters:** bugs in configuration and in how services talk to each other now show up in stage instead of in front of customers.
+On Myntra, each colour (or size) of a product is a separate **style** with its own ID. A red shirt and the same shirt in blue are two styles. Styles of the same product form a group — call it a **cluster**.
 
-## 1.3 Project 2: aggregated ratings — the main story
+Ratings were stored and shown *per style*. So the red shirt showed 4.4★ from 1.6k ratings, the blue one 4.3★ from 3.5k, and a newly added green one showed "No Ratings" — even though it's the same shirt with 5,000+ ratings. The goal: every style in a cluster shows **one combined rating**.
 
-**The problem.** Each colour or size of a product is a separate **style** with its own ID. Ratings were stored and shown *per style*, so one colour showed 4.4★ from 1.6k ratings, another 4.3★ from 3.5k, and a new colour showed **"No Ratings"** even though the product had thousands. Related styles form a group called a **cluster**; the goal was one **aggregated rating** per cluster, shown on every style in it.
+Why was it broken? Two places:
+- **When a page loaded and the cache missed**, the service filled the cache with that one style's own rating, not the cluster's.
+- **When someone submitted a rating**, the database was updated and then only *that* style's cache entry was refreshed. Its siblings kept their old numbers.
 
-**Why it was broken.** When a page loaded and the cache didn't have the rating, the service filled the cache with that one style's own rating. When someone submitted a rating, only that style's cache entry was refreshed — its sibling styles were never updated.
+### The fix, step by step
 
-**What you built — the flow:**
+**1. Find out who the siblings are.** The service doesn't know which styles belong together — another internal service, **Accio**, does. So whenever the rating needs recomputing, you ask Accio "what are the related styles of X?". Many teams depend on Accio, so you mustn't flood it. Instead of one call per style, you send **20 styles per call** (Accio's team recommended 20–25). That alone cuts the calls about 20×.
 
-```
-Page load misses the cache   or   a user submits a rating
-                     \           /
-                      ▼         ▼
-           rate limiter (token bucket)
-             │ allowed           │ rejected
-             ▼                   ▼
-   ask Accio for related      Kafka error queue → retried later
-   styles (20 per call)
-             ▼
-   cache the related-styles set (7 days)
-             ▼
-   one SQL query for the whole cluster → add up in Go
-             ▼
-   write the combined rating to EVERY style in the cluster
-```
+**2. Cache the sibling list.** Which styles belong together rarely changes, so the list itself goes into Aerospike for 7 days. Next time anyone in that cluster needs a recompute, the list is already there — no Accio call.
 
-Each piece, simply:
-- **Accio** is Myntra's internal service that knows which styles belong together. You call it in **batches of 20** instead of once per style — about 20× fewer requests on a service many teams share.
-- The **related-styles set is cached for 7 days**, because it rarely changes and is needed every time. A **TTL** (time to live) is how long a cached value is kept before it expires.
-- A **rate limiter** caps how fast you call Accio, so traffic spikes don't overload it. You used a **token bucket**: a bucket holds up to B tokens and refills at a steady rate; each call uses one token; if the bucket is empty, the call is refused. That allows short bursts but caps the average. It was set **per pod** (a *pod* is one running copy of the service), starting at 180 requests per minute per pod.
-- **Kafka** is a durable event log: one service writes events, others read them at their own pace. Calls the rate limiter refused were put on a Kafka **error queue** and processed again later, so the result becomes correct eventually instead of being lost. That's **eventual consistency**: data may be briefly out of date but always catches up.
-- **The aggregate maths:** add up the number of 1★, 2★ … 5★ ratings across all styles in the cluster, then take the weighted average. *Never average the styles' averages* — a style with 2 ratings would count as much as one with 2,000.
+**3. Compute the combined rating correctly.** Add up how many 1★, 2★, 3★, 4★ and 5★ ratings exist across *all* styles in the cluster, then take the average of that. Don't average each style's average — that gives a style with 10 ratings the same weight as one with 1,000. Quick example: style A is 4.0★ from 1,000 ratings, style B is 5.0★ from 10. Average of averages says 4.5★. Correct answer: (4×1000 + 5×10) / 1010 ≈ **4.01★**.
 
-**The SQL bug — your best debugging story.** The old code built a SQL `CASE` expression ("if the style is in this list, its group is X; else if it's in that list…") by looping over a Go **map** (a key-value lookup table). Two facts collided:
-1. SQL `CASE` stops at the **first** matching rule.
-2. Go deliberately returns map entries in a **random order** each time.
+**4. Write the result to every style in the cluster**, not just the one that triggered it. Now all colours show the same number.
 
-Some styles appeared in two groups' lists. Depending on which rule happened to come first, they landed in different groups — so **the same input gave different results on different runs**, which made it hard to find. You replaced the two old queries with **one parameterised query** (values passed separately with `?`, never pasted into the SQL text, which also blocks **SQL injection** — attackers sneaking SQL in through input) and did the grouping in Go, where it is predictable and testable.
+**5. Protect Accio with a rate limiter.** Even with batching, a burst of cache misses (say right after a deploy) could hammer Accio. A **rate limiter** puts a cap on how fast you call it. The one used is a **token bucket**: imagine a bucket that holds up to, say, 10 tokens and gets refilled at a steady 3 tokens per second. Each call takes one token. If the bucket is empty, the call is refused. So a short burst of 10 goes straight through, but over time you can't exceed 3 per second. The limit was set **per pod** — a pod is one running copy of the service — starting at **180 requests per minute per pod** (which is exactly 3 per second).
 
-**That's the "50% fewer DB connections":** two queries became one, so one database round trip instead of two **per rating computation**. If asked "50% of what?", say exactly that — it's not a service-wide number.
+One catch worth mentioning: since each pod has its own bucket, the real total is *per-pod limit × number of pods*, and that changes whenever the service scales up or down. For a strict overall cap you'd keep a shared counter (e.g. in Redis) or let Accio enforce a quota.
 
-**The 5.7-million-style cache warmup.** Before launch, the cache had no related-style data at all; launching like that would send every page load to Accio at once. So you **warmed up** the cache — pre-filled it for all **5,710,991** live styles — by publishing refresh events in batches of 20, overnight, through the same code path as normal traffic.
-- **Run 1 refreshed only about 22%.** Events were published as fast as possible, so the token bucket emptied almost instantly and most calls were refused; and one refused call failed its whole batch of 20.
-- **Fix:** a **4 ms pause between events** plus a higher rate limit, so events arrived at about the rate the bucket refills. Run 4 reached 99.99%; run 5 cleared the last 120. 100% after 5 runs.
-- **Lesson:** "Work out the throughput budget first — pods × per-pod limit — and pace the sender to match. Don't rely on the limiter to absorb an unlimited burst."
+**6. Don't lose refused work — the error queue.** What happens to a call the limiter refuses? Dropping it would leave that cluster wrong. Instead, the event is moved to an **error queue** on **Kafka** and processed again later.
 
-**Testing:** before/after checks that sibling styles show the same rating, plus a **load test** (does it hold up under heavy traffic?) and a **memory-leak test** (does memory keep growing over time?).
+Kafka in one paragraph: it's a durable log of events. One service writes events into a named stream (a *topic*); other services read from it at their own pace and remember how far they've read. Messages stay for days, so nothing is lost if a reader is slow or restarts. The cache-refresh events and the error queue both live on Kafka.
 
-## 1.4 Smaller work
-- **Ratings mismatch bug:** the reviews section of the page showed an old rating while the ratings section showed the new one — two caches, only one refreshed. You made both refresh on the same events. *Lesson: every cached copy must update on the same triggers.*
-- **Hacker Ramp** (Myntra's Gen AI hackathon): a tool mapping which services call which APIs; you parsed API definitions from GitHub links.
-- **Big Fashion Festival** (Myntra's biggest sale): you monitored the service and helped debug live issues. Watch error rate, slowest-response times (p99 latency), cache hit rate and queue length.
+The result is **eventual consistency**: for a short while a cluster might show a slightly old number, but it always catches up. For ratings that's perfectly fine.
 
-## 1.5 Myntra questions — short answers
-- **"Why move the grouping from SQL into Go?"** The data per request is small; the SQL version was built from strings, buggy and untestable; the Go version is predictable, testable and saves a round trip.
-- **"Weakness of your error queue?"** Retries were instant (the services had no delay function), so retries could hit the same empty bucket again. Better: delayed retry queues, **exponential backoff** (wait 1 s, 2 s, 4 s… with some randomness), a maximum number of attempts, then a **dead-letter queue** for messages that keep failing.
-- **"How does the cache stay consistent with the database?"** Every new rating triggers a recompute from the database that overwrites every style in the cluster; a cache miss triggers a full recompute; the 7-day TTL is a safety net.
-- **"Per-pod limits — any problem?"** The total limit grows with the number of pods. For a strict overall cap, use a shared counter (e.g. in Redis) or a quota enforced by Accio.
-- **"How does this apply at Zomato?"** Restaurant ratings across outlets of one brand, or dish ratings across menu variants — same pattern.
+One honest weakness: retries from the error queue were **instant**, because the Go services had no delay function available. Instant retries can hit the same empty bucket and fail again. The better design is to wait before retrying and wait longer each time (1 s, 2 s, 4 s… — **exponential backoff**, with a little randomness called *jitter* so retries don't all land together), give up after a few attempts, and move hopeless messages to a **dead-letter queue** for someone to inspect. Say this yourself — interviewers love it.
 
----
+### The SQL bug (your best debugging story)
 
-# Part 2: Atlassian — Software Engineer Intern, Marketplace (May – Jul 2025)
+Before the fix, the database work was done with two SQL queries. To group styles into clusters, the code built a SQL `CASE` expression on the fly — basically "if the style is in this list, its group is A; else if it's in that list, its group is B; …". The code built those lines by looping over a Go **map** (a key → value lookup table) of group → styles.
 
-## 2.1 Where you were
+Two facts collided:
+1. SQL `CASE` checks the lines **in order and stops at the first match**.
+2. Go **deliberately shuffles the order** you get when you loop over a map — every run is different.
 
-Atlassian makes Jira, Confluence and Bitbucket. **Atlassian Marketplace** is their app store: outside companies (*vendors*) publish apps and plugins there, and customers install them. *Publishing* an app means creating its listing, version, details and compatibility so it goes live.
+Some style IDs appeared in two groups' lists (for example, 34476499 was a group of its own *and* in 34220967's list). Whichever line happened to come first won. So **the same input gave different groupings on different runs** — the bug appeared and disappeared, which is what made it hard to catch.
 
-**The problem:** publishing had manual steps — someone checked each request and created the app by hand. That was slow, error-prone, and couldn't keep up as requests grew.
+The fix: one simpler query that just returns ratings and review/image counts **per style**, and the grouping done in Go code where the logic is explicit, predictable and testable. The new query is **parameterised** — values are passed separately with `?` placeholders rather than glued into the SQL text, which also blocks **SQL injection** (attackers smuggling SQL in through input).
 
-**What you built (from the resume):** an **event-driven** system in **Kotlin** and **Spring Boot** on **AWS**, using an **SQS** queue and **worker pools**, that validates requests and creates apps automatically.
+That's where the resume's **"50% fewer database connections"** comes from: two queries became one, so one database round trip instead of two **for each rating computation**. If they ask "50% of what?", say exactly that. It's not a service-wide number.
 
-The tools, simply:
-- **Kotlin** is a modern language that runs on the Java Virtual Machine and works seamlessly with Java code (hence "Kotlin, Java" on the resume). Its big feature is **null safety**: a variable can't be empty (null) unless you mark it as allowed to be, which prevents a whole class of crashes.
-- **Spring Boot** is the standard Java/Kotlin framework for building web services. You write classes; Spring creates them and connects them to each other (**dependency injection** — a class receives what it needs instead of creating it, which makes code loosely coupled and easy to test).
-- **AWS** is Amazon's cloud. **SQS (Simple Queue Service)** is its managed message queue.
+Two small details you might be asked:
+- The query uses a `LEFT JOIN` so styles with no reviews still appear, `COALESCE(x, 0)` to turn the resulting blanks into 0, and `COUNT(DISTINCT …)` because joining a review to several images multiplies rows and would over-count.
+- In Go, counts were added up in one flat map whose key packs two numbers into one: `(mainID << 32) | rating` — group ID in the top 32 bits, star rating in the bottom 32. That avoids creating a separate inner map per group (the report estimates about 50% less memory). It works because style IDs (~8 digits) and ratings (1–5) both fit in 32 bits.
 
-## 2.2 Event-driven, in plain words
+### The 5.7-million-style cache warmup
 
-In a normal **request-response** system, the caller waits while the server does all the work. If the work is slow or fails halfway, the caller sees the failure.
+Here's the last problem. When the fix went live, the cache had no sibling lists at all. Every product page would miss the cache and call Accio at the same time. So before launch the cache had to be **warmed up** — pre-filled for all **5,710,991** live styles.
 
-In an **event-driven** system, the server records the request as a message (an *event*) on a **queue** and replies straight away. Separate **workers** pick messages off the queue and do the slow work.
+Vaideeka built an endpoint that published refresh events in batches of 20 styles (about 285,000 events), run overnight when traffic is low, through the same code path as normal traffic. Each run retried only what failed last time.
 
-Why this is better here:
-- The API replies fast, even when publishing takes a while.
-- A burst of requests (say, a release day) just waits in the queue instead of crashing the system.
-- If a step fails, the message can be retried without the vendor noticing.
-- The API and the workers can be scaled separately.
+**Run 1 refreshed only about 22%** (1.28M). Two reasons:
+- Events were fired as fast as possible. A token bucket allows a burst and then only its refill rate, so the bucket emptied almost instantly and nearly everything after that was refused.
+- One refused Accio call failed its whole batch of 20.
 
-The cost: the result isn't instant, there are more moving parts, and you need to track status and protect against duplicates.
+Runs 2 and 3 crept up. In **run 4** she added a **4 ms pause between events** and raised the limit. Now events arrived at roughly the rate the bucket refills, so they stopped being refused: **99.99%** success. Run 5 cleared the last 120. 100% after 5 runs.
 
-## 2.3 The flow *(check details)*
+The lesson, in her words: *"Work out the throughput budget first — pods × per-pod limit — and pace the sender to match it. Don't expect the rate limiter to absorb an unlimited burst."* What she'd do differently: calculate the pace up front, and retry failed styles one by one instead of failing a whole batch.
 
-```
-Vendor ──► Spring Boot API
-             1. check login and permissions
-             2. validate the request ──── invalid ──► reply "400 Bad Request" with reasons
-             3. save it with status RECEIVED
-             4. put a message on SQS
-             5. reply "202 Accepted" + request ID
-                        │
-                        ▼
-                    SQS queue ──── fails too many times ──► dead-letter queue (DLQ)
-                        │
-                        ▼
-             Worker pool (several servers × several workers each)
-             - already processed this request ID? skip
-             - create the app through Marketplace APIs
-             - success: mark PUBLISHED and delete the message
-             - failure: leave it; it reappears and is retried
-```
+Before release, a **load test** (does it hold up under heavy traffic?) and a **memory-leak test** (does memory keep growing over time?) both passed.
 
-**HTTP status codes in there:** *400 Bad Request* = your request is invalid; *202 Accepted* = received and queued, not finished yet (the honest code for async work); for comparison, *201 Created* = done.
+### The stage environment (her first project)
 
-## 2.4 The concepts behind each resume bullet
+Code usually goes through several environments: **dev** (for developers, with lots of faked parts), **stage** (a realistic copy of production for final testing) and **production** (real users). The ratings service had no stage, so changes went from half-fake dev straight to customers.
 
-**Validation (bullet 3).** Two kinds:
-- *Format checks:* required fields present, correct types and lengths. In Spring these are annotations on the request class such as `@NotBlank` and `@Size`, switched on with `@Valid`.
-- *Business checks:* does this vendor own this app? Is the version newer than the last one?
+She built it: pointed the service at the stage versions of everything it talks to, with **timeouts** (how long to wait for an answer before giving up — without them, one slow dependency can freeze your whole service); created the MySQL database with the production structure and made-up data (real reviews are user data, so not copied); set up Aerospike; created database and event credentials and stored them in **Vault**, a secrets manager, so passwords never live in code; then deployed and checked the connections and logs.
 
-Checking *before* queuing gives the vendor a clear error straight away, and stops workers wasting time on requests that will fail anyway.
+### Smaller work
+- **Ratings mismatch:** the reviews section of the page showed an old rating while the ratings section showed the new one — two separate caches, and only one was being refreshed. She made both refresh on the same events. *Every cached copy must update on the same triggers.*
+- **Hacker Ramp** (Myntra's Gen AI hackathon): a tool that maps which internal services call which APIs. Her part parsed API definitions from GitHub links.
+- **Big Fashion Festival** (Myntra's biggest sale): monitored the service and helped debug live issues. What you watch during a peak: error rate, slowest response times (p99 latency), cache hit rate, queue length.
 
-**How SQS works (bullet 2).**
-- **Visibility timeout** — the key idea. When a worker takes a message, SQS doesn't delete it; it **hides** it for a set time (default 30 s). If the worker finishes and deletes it, it's gone. If the worker crashes, the message **reappears** after the timeout and another worker picks it up. That's how you get fault tolerance without writing extra code. Set the timeout longer than the slowest job.
-- **Dead-letter queue (DLQ):** if a message fails a set number of times, SQS moves it to a separate queue so one broken message can't block everything. You alert on the DLQ and inspect it.
-- **At-least-once delivery:** a standard SQS queue may occasionally deliver a message twice. (A *FIFO* queue keeps order and removes duplicates, with lower throughput.)
-- **Long polling:** a worker waits up to 20 s for messages instead of asking repeatedly and getting empty answers — cheaper and less wasteful.
-- Up to 10 messages per receive; up to 256 KB per message.
-
-**Worker pools.** A **fixed** number of workers (threads or Kotlin coroutines — lightweight tasks) pull messages and process them in parallel. Why fixed? Unlimited workers would run out of memory and overwhelm the downstream APIs and database; a bounded pool is a natural speed limit. If all workers are busy, they simply stop taking messages, and the rest wait safely in the queue — the queue acts as a buffer. This is called **backpressure**.
-
-**Fault tolerance.**
-- Worker crashes → message reappears → retried.
-- A message that always fails → DLQ.
-- Downstream service down → retry with **exponential backoff and jitter** (wait 1 s, 2 s, 4 s… plus a small random amount so all retries don't hit the recovering service at the same instant).
-
-**Idempotency — the most likely follow-up.** *Idempotent* means doing something twice has the same effect as doing it once. Because SQS can deliver a message twice — for example, a worker creates the app, then crashes before deleting the message — the same request may be processed again. Protections:
-- Give every request a unique ID and check "already done?" before acting.
-- Add a database **unique constraint** (e.g. on vendor + app + version) so a duplicate insert fails harmlessly.
-- Only allow status to move forward: RECEIVED → IN_PROGRESS → PUBLISHED.
-
-**Horizontal scaling.** *Horizontal* scaling = adding more machines (vs *vertical* = a bigger machine). Workers keep no data of their own — everything lives in the queue and the database — so you can just run more worker servers on the same queue; SQS hands each message to only one of them at a time. Scale automatically on queue length.
-
-## 2.5 Atlassian questions — short answers
-
-1. **"Explain your project end to end."** Use the 2.3 flow in about 90 seconds, then stop.
-2. **"What if a worker dies halfway?"** The message isn't deleted, so it reappears after the visibility timeout and another worker retries; the idempotency check stops a duplicate app.
-3. **"How do you make sure an app isn't published twice?"** Request-ID check plus a database unique constraint; forward-only status.
-4. **"Why SQS and not Kafka?"** SQS is a simple managed **job queue**: each message is handled by one worker, then deleted. **Kafka** keeps messages for days so many different services can each read the same stream and replay it. "I've used both — SQS at Atlassian for jobs, Kafka at Myntra for events."
-5. **"Why not just a thread pool inside the API server?"** Work in memory is lost if the server crashes, and the API and workers can't scale separately. A queue is durable and retries for free.
-6. **"What happens at 10× traffic?"** The queue absorbs the burst; add workers based on queue length; cap concurrency so downstream services aren't overwhelmed.
-7. **"How would you monitor it?"** Queue length, age of the oldest message, DLQ count, success and failure rates, processing time.
-8. **"What would you improve?"** The **outbox pattern:** saving the request to the database and sending it to SQS are two separate steps, so a crash between them loses the message. Instead, save the request *and* an "outbox" row in the same database transaction (both or neither), and let a small background process send outbox rows to SQS. Also: notify vendors when publishing finishes.
-9. **"How did you test it?"** *(check)* Unit tests with a fake SQS client, integration tests against a local AWS emulator such as LocalStack, and deliberately throwing errors in a worker to confirm retries and the DLQ work.
-
-**STAR story.** **S:** app publishing had manual steps, so releases were slow and error-prone. **T:** automate it so requests are validated and published without a person, reliably at high volume. **A:** built a Spring Boot API with validation that queues requests on SQS, worker pools that create the apps, retries and a DLQ for failures, and idempotent processing. **R:** no manual work in the publishing path, faster and more reliable releases, and capacity that grows by adding workers. *(Add a real number if you have one — requests per day, time saved.)*
+### Myntra questions
+- **"Walk me through it."** Problem (4.4 vs 4.3 vs "No Ratings") → why it broke → Accio in batches of 20 → cache the sibling list → combined rating written to every style → rate limiter and error queue → SQL bug and 2→1 queries → warmup. Two minutes, then stop.
+- **"Why move grouping out of SQL into Go?"** The data per request is small; the SQL version was built from strings, buggy and untestable; Go is predictable, testable and saves a round trip.
+- **"How does the cache stay in sync with the database?"** Every new rating recomputes from the database and overwrites every style in the cluster; a miss triggers a full recompute; the 7-day TTL is a safety net.
+- **"What if two people rate two colours at the same moment?"** Each recompute reads the latest database state and overwrites the whole cluster, so whichever finishes last writes a correct, current value.
+- **"How would this apply at Zomato?"** Ratings across outlets of one restaurant brand, or across variants of a dish — same pattern.
 
 ---
 
-# Part 3: Behavioural questions — which story to use
+## Atlassian (May – Jul 2025): Marketplace app publishing
 
-| Question | Story | Key line |
-|---|---|---|
-| A challenging problem | Myntra aggregated ratings, 5.7M styles | "The hard part was doing it safely against shared production services." |
-| Improving performance | Myntra: 2 queries → 1; or TraceX N+1 fix, 325 → 96 ms | Before → change → after |
-| A hard bug | Myntra: the random Go map order bug | Why it was hard (it came and went), how you found it, the fix |
-| A failure | Myntra warmup run 1: only 22% | What went wrong, the fix, what you'd do first next time |
-| Learning fast | Go at Myntra, Kotlin at Atlassian | How you learned: reading the codebase, asking mentors |
-| Teamwork or leadership | Hack-A-Sol win, iDEA top 10 | Your role, a disagreement and how it was settled |
-| Why Zomato? | Scale, real-time systems, your stack (Go, Kafka, MySQL, caching) | Name a Zomato feature you use and an engineering problem in it |
+### What the job was
 
-**Rules for STAR answers:** 60–90 seconds. "I" for your work, "we" for the team's. End with a number or a concrete result. Have one "what I'd do differently" ready for every story.
+Atlassian makes Jira, Confluence and Bitbucket. **Atlassian Marketplace** is their app store: outside companies (vendors) publish apps there and customers install them. Publishing an app means creating its listing, version and details so it goes live.
+
+That process had manual steps — someone looked at each request and created the app by hand. Slow, error-prone, and it couldn't keep up as requests grew. Vaideeka built a system that does it automatically.
+
+The tools: **Kotlin**, a modern language that runs on the Java platform and mixes freely with Java code (its headline feature is *null safety* — a variable can't be empty unless you say it may be, which prevents a whole class of crashes); **Spring Boot**, the standard framework for building Java/Kotlin web services; and **AWS SQS**, Amazon's managed message queue.
+
+### The core idea: don't make the caller wait
+
+The simple way to build this: vendor sends a request, the server does all the work — checks, creates the app, sets up the listing — and replies when done. Problem: that work is slow and touches several other systems. The vendor waits, and if any step hiccups, their whole request fails.
+
+The better way is **event-driven**. The server does only the quick part (checks the request is valid), drops the request as a message onto a **queue**, and immediately replies "got it". Separate programs called **workers** pick messages off the queue and do the slow work in the background.
+
+What you gain: the API is always fast; a sudden flood of requests just waits in the queue instead of crashing anything; a failed step can be retried without the vendor knowing; and you can add more workers without touching the API. What it costs: the result isn't instant, there are more pieces, and you have to track status and guard against duplicates.
+
+### The flow *(check details)*
+
+```
+Vendor ─► Spring Boot API
+            check permissions
+            validate the request ── invalid ──► 400 Bad Request (with reasons)
+            save it as RECEIVED
+            put a message on SQS
+            reply 202 Accepted + request ID
+                     │
+                     ▼
+                 SQS queue ── keeps failing ──► dead-letter queue
+                     │
+                     ▼
+            Worker pool
+            already done this request ID? → skip
+            create the app via Marketplace APIs
+            success → mark PUBLISHED, delete the message
+            failure → do nothing; message comes back and is retried
+```
+
+`202 Accepted` is the honest reply for async work: "received and queued, not finished yet" (vs `201 Created`, which means done).
+
+### How SQS makes this reliable
+
+The clever part of SQS is the **visibility timeout**. When a worker takes a message, SQS doesn't delete it — it just *hides* it for a while (30 seconds by default). If the worker finishes and deletes it, it's gone. If the worker crashes halfway, it never deletes it, so after the timeout the message **reappears** and another worker picks it up. You get crash recovery without writing any code for it. Set the timeout longer than your slowest job, or a slow-but-healthy worker's message will reappear and get done twice.
+
+If a message keeps failing — say the request is broken in a way validation didn't catch — after a set number of attempts SQS moves it to a **dead-letter queue (DLQ)**, so it can't clog the pipeline forever. You set an alert on the DLQ and inspect what lands there.
+
+Other SQS facts: workers use **long polling** (wait up to 20 s for a message rather than asking repeatedly and getting empty answers); a receive returns up to 10 messages; messages can be up to 256 KB. A standard queue delivers **at least once** — occasionally the same message twice. A **FIFO** queue keeps strict order and removes duplicates, at lower throughput.
+
+When something downstream is down, retry with **exponential backoff and jitter** — wait 1 s, then 2 s, then 4 s, plus a little randomness so all workers don't retry at the same instant and knock the recovering service over again.
+
+### Worker pools
+
+A **worker pool** is a fixed number of workers (threads, or Kotlin *coroutines*, which are much lighter) pulling messages and processing them in parallel. Why a fixed number? With unlimited workers you'd run out of memory and flood the systems you're calling. A bounded pool is a built-in speed limit. And when every worker is busy, they simply stop taking new messages — the rest wait safely in the queue. That's **backpressure**: the queue is your buffer.
+
+To handle more load you add more worker *machines* on the same queue — **horizontal scaling** (more machines, rather than a bigger machine). This works because workers keep nothing of their own; all state is in the queue and the database. SQS gives each message to only one worker at a time. You can autoscale on queue length.
+
+### Duplicates and idempotency (the follow-up they'll definitely ask)
+
+Remember: the message comes back if it isn't deleted. Now picture this — a worker creates the app successfully, then crashes *just before* deleting the message. The message reappears, another worker picks it up, and you've published the app twice.
+
+So processing must be **idempotent**: doing it twice has the same effect as doing it once. Three layers of protection:
+- Every request has a unique ID. Before doing anything, check "have I already processed this ID?".
+- A **unique constraint** in the database (e.g. on vendor + app + version), so a duplicate insert simply fails.
+- Status only moves forward: RECEIVED → IN_PROGRESS → PUBLISHED. A finished request can't be restarted.
+
+### Validation
+
+Validation happens in the API, *before* queuing, in two layers. Format checks — required fields present, right types, sensible lengths — are annotations on the request class in Spring (`@NotBlank`, `@Size`, switched on with `@Valid`). Business checks — does this vendor own this app? is the version newer than the last one? — are code. Doing it before the queue means the vendor gets a clear error immediately, and workers never waste time on requests that were always going to fail.
+
+### Spring Boot in a nutshell
+You write classes; Spring creates them and hands each one the others it needs — **dependency injection**. Your code doesn't build its own dependencies, so it's loosely coupled and easy to test with fakes. The usual layers: `@RestController` (handles HTTP) → `@Service` (business logic) → `@Repository` (database). `@Transactional` on a method runs it inside a database transaction — all of it commits or none of it does.
+
+### Atlassian questions
+- **"What if a worker dies halfway?"** The message isn't deleted, so it reappears after the visibility timeout and another worker retries. The idempotency check stops a duplicate.
+- **"Why SQS and not Kafka?"** SQS is a simple **job queue**: each message is done once by one worker, then deleted. Kafka keeps messages for days so many different services can read the same stream and replay it. "SQS at Atlassian for jobs, Kafka at Myntra for events — I've used both."
+- **"Why not just run a thread pool inside the API server?"** Work held in memory is lost if the server crashes, and you can't scale the API and the workers separately. A queue is durable and gives retries for free.
+- **"10× traffic?"** The queue absorbs it; add workers based on queue length; cap concurrency so the systems you call aren't overwhelmed.
+- **"How would you monitor it?"** Queue length, age of the oldest message, DLQ size, success/failure rate, processing time.
+- **"What would you improve?"** The **outbox pattern**. Saving the request to the database and putting it on SQS are two separate steps — crash between them and the message is lost. Instead, save the request *and* an "outbox" row in the same database transaction (both or neither), and let a small background process move outbox rows onto SQS.
+- **"How did you test it?"** *(check)* Unit tests with a fake SQS client, integration tests against a local AWS emulator such as LocalStack, and deliberately failing a worker to confirm the retry and DLQ behaviour.
+
+**STAR version:** app publishing had manual steps, so releases were slow and error-prone (**S**). The task was to automate it reliably at high volume (**T**). She built a Spring Boot API that validates and queues requests on SQS, worker pools that create the apps, retries and a DLQ, and idempotent processing (**A**). Result: no manual work in the publishing path, faster and more reliable releases, and capacity that grows by adding workers (**R** — add a real number if there is one).
+
+---
+
+## Which story for which behavioural question
+
+| Question | Story |
+|---|---|
+| A challenging problem | Myntra aggregated ratings across 5.7M styles |
+| Improving performance | Myntra 2 → 1 queries; TraceX N+1 fix (325 → 96 ms) |
+| A hard bug | The Go map-order bug |
+| A failure | Warmup run 1 at 22%, and what fixed it |
+| Learning fast | Go at Myntra, Kotlin at Atlassian |
+| Teamwork / leadership | Hack-A-Sol win, iDEA top 10 |
+| Why Zomato | Scale, real-time systems, same stack (Go, Kafka, MySQL, caching) |
+
+Keep each answer to 60–90 seconds, say "I" for your work and "we" for the team's, end with a number, and have one "what I'd do differently" ready.
