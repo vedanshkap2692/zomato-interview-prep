@@ -5,10 +5,10 @@
 | 1 | `01_Zomato_Interview_Guide.md` | Process and round format, what interviewers grade, DSA patterns ranked, ~120 reported/expected problems with approaches, 10-day plan, sources | Start here |
 | 1b | `01b_DSA_Must_Code.md` | C++ code for every must-know problem (LRU, LFU, BST delete, graphs, sliding window, DP, intervals, binary search, linked lists, Skyline…) | Daily: type from memory |
 | 1c | `01c_CS_Fundamentals_SQL_Design.md` | DBMS (indexing, ACID, SQL vs NoSQL), 14 SQL queries, OS, CN, OOP/HashMap, HLD (rate limiter, notifications, food ordering, seat locking), LLD/schema, Kafka/Redis | Days 2–9 |
-| 2 | `02_Resume_and_Skills_Brief.md` | Self-intro scripts, line-by-line resume Q&A, every skill with priority, risky claims | Before every mock |
+| 2 | `02_Resume_and_Skills_Brief.md` | 1.5–2 hour read: intros, every resume line explained with answers, every listed skill explained in plain words (languages, SQL, REST, Kafka, Docker/K8s, ML, system design, coursework), risky claims, checklist | Before every mock |
 | 3 | `03_Projects_TraceX_SupplySenseAI.md` | Code-verified architecture, algorithms, data models, weak spots and model answers for both projects | Days 4–7 |
 | 4 | `04_Experience_Myntra_Atlassian.md` | Atlassian SQS pipeline deep dive, Myntra summary, STAR stories | Days 1–4 |
-| 5 | `05_Myntra_Deep_Dive.md` | Verified from the internship report: stage onboarding, the aggregated-ratings design, SQL optimisation, the 5.7M cache warmup, Q&A and STAR stories | Days 1–3 |
+| 5 | `05_Myntra_Deep_Dive.md` | 30-minute read, verified from the internship report: background terms, stage onboarding, aggregated-ratings design, the SQL bug, the 5.7M warmup, top 10 questions, 3 STAR stories | Days 1–3 |
 
 **Round 1 for an off-campus fresher (2024–26 reports):**
 1. A 20–40 minute deep dive into your resume and internships.

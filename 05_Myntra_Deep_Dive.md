@@ -1,207 +1,162 @@
-# Myntra Internship Deep Dive: Ratings & Reviews Microservice
+# Myntra Internship: Ratings & Reviews Service
 
-> **Source:** the internship report (Dec 2025), 29 pages, signed off by the team's Senior Manager. Every fact, number and name below comes from that report. Sections marked **"Interview angle"** are prep added on top: likely questions, trade-offs and improvements.
-> **Role:** Software Engineer Intern, **Product-SizeFit team, Product Detail Page (PDP) org**, Myntra.
-> **Dates:** 14 July to 5 December 2025.
-> **Service:** the **Ratings & Reviews microservice, written in Go**.
+> **Reading time:** about 30 minutes. **Source:** Vaideeka's 29-page internship report (Dec 2025). Every fact and number comes from the report; anything marked *(prep)* is interview advice added on top.
+> **Role:** Software Engineer Intern, Product-SizeFit team, Product Detail Page (PDP) org. **Dates:** 14 Jul – 5 Dec 2025. **Service:** Ratings & Reviews microservice, written in **Go**.
 
 ---
 
-## 0. Quick reference: numbers and names to remember
+## 1. The whole internship on one page
 
-| Item | Value |
+You did two projects and three smaller things.
+
+1. **Stage onboarding.** The ratings service only existed in dev and production. You built it a production-like **stage** environment so changes could be tested safely.
+2. **Aggregated ratings (the main project).** Colour and size variants of the same product showed *different* ratings, and a new colour often showed "No Ratings". You made every variant show **one combined rating**, kept in sync automatically, for **5.7 million** live products.
+3. **Smaller work:** a ratings-mismatch bug fix, the Hacker Ramp hackathon, and on-call support during the Big Fashion Festival sale.
+
+**Numbers to know cold**
+
+| What | Value |
 |---|---|
-| Live product styles covered | **5.7M** (5,710,991 exactly) |
-| DB queries for the aggregated-ratings object | **2 → 1** (a 50% reduction in DB round trips/connections) |
-| Batch size for bulk calls to Accio | **20 styles per batch** (Accio team recommended 20–25) |
-| Aerospike TTL for related-style sets and aggregated ratings | **7 days** |
-| Rate limiter | **Token bucket**, configurable **per pod**; started at **180 RPM per pod** |
-| Cache warmup | **5 runs** to reach **100%** of 5,710,991 styles |
-| Warmup fix that worked | Adding a **4 ms delay** between event publications, plus raising the rate limit |
-| Error-queue retry delay | **Instant**: Go services had no delay function available |
-| Aggregation key trick | `key = (mainID << 32) \| rating` in a single Go map |
-| Tests run before release | **Memory leak test** and **load test** |
+| Live product styles covered | **5,710,991** (say "5.7 million") |
+| SQL queries per aggregated-rating computation | **2 → 1** (this is the "50% fewer DB connections") |
+| Styles per bulk call to Accio | **20** (Accio's team recommended 20–25) |
+| Cache TTL (related styles and aggregated rating) | **7 days** |
+| Rate limiter | **Token bucket, per pod**, started at **180 requests/minute per pod** |
+| Cache warmup | **5 runs** to reach 100%; run 1 succeeded for only **~22%** |
+| What fixed the warmup | A **4 ms delay** between published events, plus a higher rate limit |
+| Tests before release | **Load test** and **memory-leak test** |
 
-**Internal systems named in the report** (say the names confidently, and explain each in one line):
+**The 60-second pitch** (memorise this one; it is the only pitch you need):
 
-| Name | What it is |
-|---|---|
-| **Accio** | Internal service that is the **source of truth for relationships between styles** (which styles are variants of the same product) |
-| **Aerospike** | In-memory/SSD **NoSQL key-value store**, used as the cache |
-| **Kafka** | Event streaming for data communication between services, including the consumer queue and the **error queue** |
-| **Airbus** | Myntra's **event communication** layer between services. You created its credentials for the stage environment. |
-| **Bolt** | Where `IndexRatingAndPublish` publishes the computed aggregated ratings. *Treat it as a downstream publish target; if asked, describe it only at that level.* |
-| **Vault** | Secrets manager where you stored the DB and Airbus credentials |
-| **Style service** | Calls the ratings service with a list of style IDs to get ratings for the PDP |
-| **MySQL** | The ratings and reviews database: aggregate-rating, review, image and video tables |
-
-**Glossary from the report:**
-- **Style ID:** a unique identifier for one specific version of a product, e.g. one colour.
-- **Related styles:** style IDs that are variations of the same base product.
-- **Cluster:** the full set of related style IDs for one base product.
-- **Aggregated rating:** one combined rating across the whole cluster.
-- **RPM:** requests per minute.
+> "At Myntra I worked on the Ratings & Reviews microservice in Go. Variants of one product, like different colours, showed separate ratings, so a new colour could show 'No Ratings' while the base product had thousands. I fixed both the read and the write paths. They now fetch the product's related styles from Accio in bulk batches of 20, cache that set in Aerospike, and write one aggregated rating to every style in the group. A token-bucket rate limiter protects Accio, and anything it rejects goes to a Kafka error queue so nothing is lost. Along the way I found a non-deterministic SQL bug caused by Go's random map ordering, and I merged two queries into one, which halved the DB connections for this computation. Finally I ran a cache warmup across 5.7 million styles."
 
 ---
 
-## 1. Pitches
+## 2. Background you need first
 
-**30 seconds**
-> "At Myntra I was on the Product Detail Page org, working on the Ratings & Reviews microservice in Go. My main project fixed **aggregated ratings**. Variants of the same product, like different colours, showed separate ratings, so a new colour could show 'No ratings' while the base product had thousands. I built the flow that fetches related styles from Accio in **bulk batches of 20**, caches the full related set in **Aerospike**, and recomputes and writes the aggregated rating for **every style in the cluster**. I protected Accio with a **token-bucket rate limiter**, sent rate-limited events to a **Kafka error queue** for eventual consistency, and fixed a SQL bug caused by **Go's random map iteration order**. I merged **two queries into one** for 50% fewer DB round trips, and ran a **cache warmup for 5.7 million styles**. Before that, I onboarded the service onto a production-like **stage environment**."
+Learn these five terms before anything else. The rest of the story uses them constantly.
 
-**10 seconds:** "I fixed inconsistent product ratings across 5.7 million Myntra product variants, end to end: Go, MySQL, Aerospike, Kafka, rate limiting and a full cache warmup."
+**Style, related styles, cluster.** A *style* is one sellable version of a product, such as the red version of a T-shirt. It has a *style ID* (about 8 digits). *Related styles* are the other versions of the same base product (blue, black…). The full set is a *cluster*. One style in the cluster acts as the **main ID** that the others are grouped under.
 
----
+**Aggregated rating.** One rating computed over the whole cluster, so every colour shows the same "4.3★ from 5,100 ratings".
 
-## 2. Project 1: Ratings stage onboarding
+**Accio.** Myntra's internal service that is the **source of truth for which styles are related**. Your service has to ask Accio "what are the related styles of X?". Accio is shared by many teams, so you must not flood it.
 
-### 2.1 Problem
-The Ratings & Reviews service existed only in **production and dev**. There was no production-like environment to validate changes before production deployment.
+**Aerospike.** A distributed **key-value database used as a cache**. It keeps its index in RAM and data on SSD, so it can hold huge datasets cheaply with sub-millisecond reads. Compared with Redis: Redis keeps everything in RAM and has richer data types (lists, sorted sets); Aerospike is cheaper at very large sizes. In this service it stores two things per style: its related-styles set and its aggregated rating.
 
-### 2.2 What you did (5 tasks)
-1. **Configurations:**
-   - Worked out which services the ratings service talks to.
-   - Added their **stage endpoints**.
-   - Configured connection credentials and **timeouts**.
-2. **Database:**
-   - Created the **MySQL schema** on stage, mirroring production.
-   - Set up the ratings DB.
-   - **Populated it with mock data** (no production data).
-3. **Caching layer:**
-   - **Sized and provisioned the storage and compute** for **Aerospike** on stage.
-   - Set it up to reduce DB load and speed up PDP responses.
-4. **Credentials:**
-   - Created **read and write DB credentials**.
-   - Created **Airbus credentials** for events to and from the service.
-   - Stored all of them in **Vault**.
-5. **Deploy and test:**
-   - Deployed to stage.
-   - Validated the DB and cache connections by calling APIs and checking responses.
-   - Verified the deployment logs; there were no deployment errors.
+**Kafka.** A durable, partitioned **event log**. Producers append events to a *topic*; consumers read them at their own pace and remember their position (*offset*). Your service uses Kafka for cache-refresh events and for the **error queue**.
 
-### 2.3 Impact
-- Production parity for **integration testing** of service-to-service calls.
-- Developers can test without production deploys.
-- A safe place to debug and to test cache strategies and DB queries.
-
-### 2.4 Interview angle
-
-| Likely question | Answer outline |
-|---|---|
-| Why does a stage environment matter if you have dev? | Dev is usually partial: mocked dependencies, different configs. Stage mirrors production's topology (real DB engine, cache, event bus, downstream stage endpoints), so integration, config and timeout bugs show up before production. |
-| Why mock data, not a production copy? | Privacy and compliance (user reviews are user data), plus size and cost. Mock data must still cover the edge cases: styles with no ratings, large clusters, images and videos. |
-| Why are timeouts important in service config? | Without timeouts, a slow dependency ties up goroutines and connections, and the failure cascades. Set timeouts based on the dependency's p99 latency; pair them with retries and circuit breakers. |
-| Why Vault? | Secrets never live in code or config repos. You get access control, auditing and rotation. *(Contrast: an API key hard-coded in a deploy script is exactly what Vault prevents.)* |
-| How did you size the Aerospike cluster? | From the expected key count × average record size × replication factor, plus headroom; compute from the expected QPS. *Give the real numbers only if you remember them; otherwise explain the method.* |
-| What's Aerospike vs Redis? | Both are key-value stores. Aerospike is built for **SSD/flash plus RAM** (index in RAM, data on SSD), so it holds very large datasets cheaply with sub-millisecond latency, and it's distributed with automatic sharding. Redis keeps everything in RAM and has richer data structures. Myntra uses Aerospike for large catalogue caches. |
+**Other names in the report** (one line each is enough):
+- **MySQL** holds ratings, reviews, images and videos.
+- **Vault** is the secrets manager where DB and event credentials live.
+- **Airbus** is Myntra's inter-service event layer.
+- **Bolt** is a downstream system that receives published aggregated ratings.
+- The **style service** calls your service with a list of style IDs when a product page loads.
 
 ---
 
-## 3. Project 2: Aggregated ratings (the main story)
+## 3. Project 1: Stage onboarding
 
-### 3.1 The problem
-- Users saw **per-style ratings** instead of one rating for the product. For example, two colour variants of the same item showed **4.4★ (1.6k ratings)** and **4.3★ (3.5k ratings)**, and a new colour might show **"No Ratings"**.
-- **Root cause:** related styles were **not automatically inserted or updated in the cache**. After a new rating, the newly computed aggregated rating was **not written to the other related styles** in the cache.
+**Problem.** The ratings service had only dev (partial, mocked) and production. There was nowhere realistic to test a change before it went live.
 
-### 3.2 The four issues you identified
+**What you did, in five steps**
+1. **Configuration.** Listed every service the ratings service talks to, pointed each at its stage endpoint, and set credentials and **timeouts**.
+2. **Database.** Created the MySQL schema on stage to mirror production and filled it with **mock data** (no production user data).
+3. **Cache.** Sized and provisioned the Aerospike cluster (storage and compute).
+4. **Credentials.** Created DB read/write credentials and Airbus credentials, and stored them all in **Vault**.
+5. **Deploy and verify.** Deployed, called the APIs to confirm the DB and cache connections worked, and checked the logs for errors.
 
-**Issue 1: Read flow (cache refresh of existing ratings).**
-1. The style service calls the ratings service with style IDs.
-2. The ratings service reads Aerospike.
-3. On a cache miss, it publishes an event to refresh those style IDs.
-4. **Bug:** the refresh writes the style's **individual** rating, which may not be the aggregate.
+**Why it matters:** developers can now run real service-to-service integration tests, debug safely and try out cache and query changes without touching production.
 
-**Issue 2: Write flow (adding a new rating).**
-1. A user rates style 1.
-2. `SetRating` updates the DB.
-3. `IndexRatingAndPublish` runs **asynchronously**: it computes the aggregate for style 1, publishes to Bolt, and refreshes **style 1's** cache.
-4. **Bug:** the **related styles of style 1 are never updated**.
+**Questions you may get**
+- *"Why stage if you already have dev?"* Dev usually mocks dependencies and uses different config. Stage copies production's shape: same DB engine, same cache, same event system, real (stage) downstream services. Config mistakes, timeout problems and integration bugs show up there instead of in production.
+- *"Why mock data and not a copy of production?"* Reviews are user data, so copying them raises privacy and compliance issues. A full copy is also large and costly. The mock data still has to cover edge cases: styles with no ratings, big clusters, reviews with images and videos.
+- *"Why do timeouts matter?"* Without a timeout, one slow dependency holds goroutines and DB connections open until the service runs out of them and fails too. That is a *cascading failure*. Set timeouts from the dependency's normal worst latency (p99), and combine them with retries and circuit breakers.
+- *"Why Vault?"* Secrets never sit in code or config repos. Vault adds access control, an audit trail and rotation.
+- *"How do you size a cache?"* Number of keys × average record size × replication factor, plus headroom for growth; compute nodes from expected requests per second. If you don't remember the actual numbers, explain the method.
 
-**Issue 3: The SQL CASE bug (Go map ordering).** *This is a great debugging story.*
-- The query mapped each style ID to its group's main ID with a `CASE WHEN style_id IN (...) THEN mainID ...` built in Go.
-- SQL `CASE` evaluates `WHEN` clauses **in order, and the first match wins**.
-- Some style IDs were both **main IDs themselves** and **members of another main ID's related list**. In the report's example, 34476499 and 33435241 are main IDs and also appear in 34220967's related list.
-- The CASE clauses were generated by **iterating over a Go map, and Go map iteration order is deliberately random**. Sometimes 34220967's clause came first, so 34476499 and 33435241 were absorbed into it and **didn't appear as their own groups**.
-- **Result:** aggregated ratings weren't correctly updated for every related style. The bug was **non-deterministic**: it came and went between runs.
+---
 
-**Issue 4: Stale cache after deployment.**
-- Existing cache entries held possibly-individual ratings.
-- Even after the fix shipped, related styles would disagree **until their TTL expired**, up to 7 days.
-- That's why a **cache warmup** was needed.
+## 4. Project 2: Aggregated ratings
 
-### 3.3 Solution architecture (6 components)
+### 4.1 The problem
+
+A customer opening two colours of the same shirt saw **4.4★ (1.6k ratings)** on one and **4.3★ (3.5k ratings)** on the other. A newly added colour showed **"No Ratings"** even though the product had thousands.
+
+**Root cause in one sentence:** the cache stored ratings **per style**, and when someone rated one style, **only that style's cache entry was updated**, never its related styles.
+
+### 4.2 The four issues you found
+
+1. **Read path wrote the wrong value.** When a product page loaded and the cache missed, the service published a refresh event. The refresh stored that style's **individual** rating, not the cluster's aggregate.
+2. **Write path forgot the siblings.** A user rates style 1 → `SetRating` writes to MySQL → `IndexRatingAndPublish` runs asynchronously, computes the aggregate and refreshes **style 1 only**. Style 1's related styles keep their old values.
+3. **A non-deterministic SQL bug** (your best debugging story, section 4.4).
+4. **Stale cache after release.** Even after the fix shipped, old entries would keep wrong values for up to 7 days until their TTL expired. So the cache had to be **warmed up** in advance (section 4.6).
+
+### 4.3 The design
 
 ```
-                         READ FLOW (PDP fetch)                                WRITE FLOW (new rating)
- Style service ──► Ratings svc: get ratings(styleIDs)              User rates style S
-                     │                                                   │
-              Aerospike hit? ── yes ─► return aggregated rating     SetRating → MySQL
-                     │ no                                                │ (async)
-                     ▼                                             IndexRatingAndPublish
-         publish refresh event (Kafka)                                   │
-                     ▼                                                   ▼
-         consumer: rate limiter (token bucket, per pod)       fetch related styles of S
-            │ allowed                    │ rejected           (Accio bulk, batches of 20, rate-limited)
-            ▼                            ▼                               │
-   Accio BULK fetch related styles   ERROR QUEUE (Kafka)          single SQL query: ratings +
-   (20 styles / batch)               → re-processed later         review/image counts for cluster
-            ▼                          (eventual consistency)            │
-   write related-style set to Aerospike (TTL 7d)                aggregate in Go by mainID
-            ▼                                                            │
-   single combined SQL query → aggregate in Go                  write aggregated rating for ALL
-            ▼                                                    related styles to Aerospike (TTL 7d)
-   write aggregated rating for all related styles (TTL 7d)       + publish to Bolt
+READ PATH (product page loads)                 WRITE PATH (user submits a rating)
+
+style service → ratings service                SetRating → MySQL
+      │                                              │ (async)
+ Aerospike hit? ── yes → return rating          IndexRatingAndPublish
+      │ no                                           │
+ publish refresh event (Kafka)                       │
+      │                                              │
+      └──────────────┬───────────────────────────────┘
+                     ▼
+     rate limiter (token bucket, per pod)
+        │ allowed                  │ rejected
+        ▼                          ▼
+ Accio bulk call (20 styles)    Kafka ERROR QUEUE → retried later
+        ▼
+ store related-styles set in Aerospike (TTL 7 days)
+        ▼
+ ONE SQL query for the whole cluster → aggregate in Go
+        ▼
+ write the aggregated rating to EVERY style in the cluster (TTL 7 days)
+ (+ publish to Bolt on the write path)
 ```
 
-1. **Bulk fetch of related styles:**
-   - Calls to **Accio** are batched, **20–25 styles per request**, instead of one call per style. The Accio team recommended this size to balance latency against bandwidth.
-   - This lowers the RPM sent to Accio.
-2. **Cache management:**
-   - The **related-styles set is written to Aerospike before the aggregate is computed**, in **both** the read flow (on a miss) and the write flow.
-   - So later requests always find the set.
-   - **TTL is 7 days** for both the set and the aggregated rating.
-3. **Rate limiting:**
-   - A token bucket on calls to Accio protects it during traffic bursts.
-   - It is configurable **per pod**, using the team's existing rate-limiter framework.
-4. **SQL fix:** the query now accounts for the related-styles set correctly (section 3.5).
-5. **Error queue:**
-   - Events **rejected by the rate limiter** are redirected from the consumer queue to an **error queue** and processed later.
-   - This gives **eventual consistency** instead of data loss.
-6. **Cache pre-population (warmup):** fill Aerospike with aggregated ratings and related sets **before** the solution goes live, to avoid a 100% miss rate (section 3.6).
+The six pieces, and **why each exists**:
 
-### 3.4 What you built (8 tasks)
+1. **Bulk fetch from Accio (20 per call).** One call per style would mean millions of calls. Batching cuts the request rate on Accio about 20×. Accio's team chose 20–25 as the balance between latency and payload size.
+2. **Cache the related-styles set first.** The set rarely changes and is needed on every recompute. It is written to Aerospike *before* computing the aggregate, on both paths, so the next request for any style in that cluster finds it without calling Accio.
+3. **Token-bucket rate limiter on Accio calls.** Protects a shared service during traffic spikes, cache-miss storms after deploys, and the warmup. You used the team's existing limiter framework, configured per pod.
+4. **SQL fix and merge.** One parameterised query instead of two string-built ones (section 4.4).
+5. **Kafka error queue.** Events the limiter rejects are not dropped; they are moved to an error queue and processed again later. The data ends up correct eventually (*eventual consistency*) instead of being lost.
+6. **Cache warmup before launch.** Fill the cache for all 5.7M styles so the release doesn't start with every lookup missing (section 4.6).
 
-| # | Task | Details |
-|---|---|---|
-| 1 | **Fixed the write flow** | Fetch related styles from Accio; publish the corrected aggregated rating to the cache for **all** related styles |
-| 2 | **Related-styles bulk flow** | A new bulk path to Accio with batches of **20**; used to insert related sets into the cache |
-| 3 | **Fixed the read flow** | On a miss for ratings or related styles, use the bulk flow to load the full related set **before** computing the aggregate |
-| 4 | **Error queue setup** | Configured a Kafka error queue to hold messages rejected by the rate limit |
-| 5 | **Rate limiting** | Token bucket where Accio is called; RPM configurable per pod |
-| 6 | **Error flow** | Route over-limit messages to the error queue; retries are instant, because Go services had no delay function available |
-| 7 | **SQL query fix + optimisation** | Fixed the CASE grouping bug; merged 2 queries into 1, so ratings, reviews and image counts come back over **1 DB connection instead of 2**: **50% fewer connections** |
-| 8 | **Cache pre-population** | An HTTP endpoint that publishes cache-refresh events for **all 5.7M live styles**; **deployed overnight** to avoid peak traffic; the full solution went out before the warmup completed |
+**How a token bucket works** (expect this question). A bucket holds up to *B* tokens and is refilled at *R* tokens per second. Each request takes one token; if the bucket is empty, the request is rejected. This allows short bursts (up to *B*) while holding the long-run average to *R*. It costs two numbers per limiter: the current token count and the last refill time.
 
-### 3.5 SQL optimisation in detail
+**The catch with "per pod".** Every pod (running copy of the service) has its own bucket. Total traffic to Accio is therefore *per-pod limit × number of pods*, which changes when the service autoscales. For a strict global cap you would use a shared counter in Redis or Aerospike, or have Accio enforce a quota per caller.
 
-**Old approach: 2 queries, both with hard-coded CASE maps.**
-- **Query 1, ratings:**
-  1. A subquery on the aggregate-rating table, filtered by `style_id IN (...)`, derives `main_id` through a `CASE` map.
-  2. The outer query groups by `main_id` and **pivots** the counts per star with conditional aggregation: `SUM(CASE WHEN rating = 1 THEN count END)` and so on.
-- **Query 2, review and image counts:**
-  1. Joins the review table to the image table (`LEFT JOIN`), filtered by style IDs and status (`ACTIVE`, `IMAGE_REJECTED`).
-  2. Groups by the CASE-derived ID.
-  3. Returns `COUNT(*)` (reviews) and `COUNT(i.id)` (images; counts only non-null rows from the LEFT JOIN).
-- **Problems:**
-  - 2 round trips.
-  - Hard-coded SQL built by string manipulation for every input.
-  - The ordering bug.
-  - Can't handle **overlapping** mappings, where one style belongs to several main IDs.
+### 4.4 The SQL bug and the query rewrite
 
-**New approach: 1 parameterised query, with aggregation in Go.**
+**The old setup: two queries.**
+- **Query 1 (ratings)** mapped each style ID to its main ID with a `CASE` expression built in Go, then grouped by main ID and counted ratings per star (`SUM(CASE WHEN rating = 1 THEN count END)`, and so on for 2–5).
+- **Query 2 (counts)** joined reviews to images, grouped by the same `CASE`-derived main ID, and returned review and image counts.
+
+The `CASE` looked like this, generated from a Go map of `mainID → [related style IDs]`:
 
 ```sql
--- Shape of the new query (reconstructed from the report's description)
+CASE
+  WHEN style_id IN (34220967, 34476499, 33435241, ...) THEN 34220967
+  WHEN style_id IN (34476499, ...)                     THEN 34476499
+  ...
+END AS main_id
+```
+
+**The bug.** Two facts collided:
+- SQL `CASE` checks `WHEN` clauses **in order and stops at the first match**.
+- Go **deliberately randomises map iteration order**, so the clauses came out in a different order on each run.
+
+Some IDs, such as 34476499 and 33435241, were main IDs of their own *and* also appeared in 34220967's related list. On runs where 34220967's clause came first, those two styles were swallowed into 34220967's group and their own groups disappeared. **The same input produced different results on different runs.** Bugs like this are hard to find because they appear and vanish.
+
+**The fix: one parameterised query, grouping moved into Go.**
+
+```sql
+-- shape of the new query (reconstructed from the report)
 SELECT ar.style_id, ar.rating, ar.count,
        COALESCE(rc.total_reviews, 0) AS total_reviews,
        COALESCE(rc.total_images, 0)  AS total_images
@@ -214,278 +169,149 @@ LEFT JOIN (
     LEFT JOIN image i ON i.review_id = r.id
     LEFT JOIN video v ON v.review_id = r.id
     WHERE r.style_id IN (?)
-      AND ( r.status IN ('ACTIVE','IMAGE_REJECTED','IMAGE_ONLY_ACCEPTED')
-            OR i.id IS NOT NULL      -- has an approved image
-            OR v.id IS NOT NULL )    -- has an active video
+      AND (r.status IN ('ACTIVE','IMAGE_REJECTED','IMAGE_ONLY_ACCEPTED')
+           OR i.id IS NOT NULL OR v.id IS NOT NULL)
     GROUP BY r.style_id
 ) rc ON rc.style_id = ar.style_id
 WHERE ar.style_id IN (?) AND ar.rating IN (1,2,3,4,5) AND ar.rating_type = 1;
 ```
 
-Then, in Go:
-1. Build the **style_id → main_id** mapping (from Accio's related sets).
-2. Run the one query.
-3. Aggregate per main ID with **a single map keyed by `(mainID << 32) | rating`**.
-4. Compute the averages and return.
+The query now returns plain **per-style** rows. Go then applies the style → main-ID mapping (from Accio's sets) and adds up the numbers. Because the mapping is explicit code, a style that belongs to several groups is handled correctly, and the result is the same every time.
 
-**The bit-packing trick** (they may ask you to explain or code it):
+**Three SQL details to be able to explain:**
+- **`LEFT JOIN`** keeps every rating row even when the style has no reviews; an inner join would drop it.
+- **`COALESCE(x, 0)`** turns the NULLs that a LEFT JOIN produces into 0.
+- **`COUNT(DISTINCT …)`** is needed because joining one review to several images and videos multiplies rows. A plain `COUNT` would over-count (the "join fan-out" problem).
+
+**What the rewrite bought you:**
+- 2 round trips → 1, which is **the 50%**.
+- Parameterised (`?`) instead of string-built SQL, so no SQL injection risk and the DB can reuse the query plan.
+- Grouping logic in Go is unit-testable and deterministic.
+- Overlapping group membership is handled.
+
+**The bit-packing trick in Go.** To sum counts per (main ID, star), you used **one flat map** instead of a map of maps:
 
 ```go
-key := (uint64(mainID) << 32) | uint64(rating)   // pack two 32-bit values into one uint64
-counts[key] += row.Count                           // one flat map instead of map[mainID]map[rating]int
+key := (uint64(mainID) << 32) | uint64(rating) // main ID in the high 32 bits, rating in the low 32
+counts[key] += row.Count
 
-mainID := key >> 32                                // unpack
+mainID := key >> 32          // unpack
 rating := key & 0xFFFFFFFF
 ```
 
-- **Why:** one flat map avoids allocating an inner map per main ID. The report estimates about **50% less memory** than nested maps, and lookups are O(1).
-- **Precondition:** both values fit in 32 bits. Style IDs are about 8 digits, well under 2³² ≈ 4.29 billion, and ratings are 1–5.
-- **An alternative to mention:** a struct key, `map[struct{main, rating uint32}]int`. Go allows comparable structs as map keys. It's more readable, with similar performance.
+- *Why:* a nested `map[mainID]map[rating]int` allocates a new inner map for every main ID. One flat map avoids that; the report estimates about **50% less memory**.
+- *Why it's safe:* both values fit in 32 bits. Style IDs (~8 digits) are far below 2³² ≈ 4.29 billion, and ratings are 1–5.
+- *Alternative to mention:* Go allows a struct as a map key, `map[struct{ main, rating uint32 }]int`. It's more readable with similar performance.
 
-**How the aggregate is computed** (the classic follow-up):
-- For each main ID, **sum the per-star counts across every style in the cluster**: `count_k = Σ count(style, rating = k)`.
-- Then `avg = Σ k·count_k / Σ count_k`, and the user count is `Σ count_k`.
-- This is a **histogram merge**. It's exact, and unlike *averaging the averages* it weights each style by its number of ratings.
-- **Why averaging the averages is wrong:** a style with 2 ratings would weigh as much as one with 2,000.
+### 4.5 Computing the aggregate correctly
 
-**Improvements to cite:**
-- 50% fewer DB round trips.
-- Parameterised queries, so no SQL injection.
-- Logic in Go is testable.
-- Handles **overlapping** mappings.
-- Partial results can be processed.
+For each cluster, **add up the count for each star across all its styles**, then take the weighted average:
 
-### 3.6 The cache warmup: 5.7M styles
+- `count_k` = total number of k-star ratings across the cluster (k = 1…5)
+- `total = count_1 + … + count_5`
+- `average = (1·count_1 + 2·count_2 + … + 5·count_5) / total`
 
-**Why:** before the fix, Aerospike had **no related-style data**. Deploying would have caused a **100% cache miss** on related styles, which means a flood of Accio calls.
+This is a **histogram merge**, and it is exact. **Never average the per-style averages:** a style with 2 ratings would count as much as one with 2,000. Example: style A has 4.0★ from 1,000 ratings, style B has 5.0★ from 10. The average of averages is 4.5★; the correct answer is (4,000 + 50) / 1,010 ≈ **4.01★**.
 
-**What you did:**
-- An endpoint that **publishes refresh events in batches of 20 style IDs** for all 5.7M styles: about **285k events**.
-- The events were consumed by the corrected flow.
+### 4.6 The 5.7-million-style cache warmup
 
-**Execution: 5 runs.** Each run re-processed only the styles that had failed before.
+**Why.** Before launch, the cache had no related-style sets at all. Releasing without a warmup would make every product page miss the cache and call Accio at once.
 
-| Run | Style IDs in | Refreshed | Rate-limit errors |
+**How.** You built an HTTP endpoint that published refresh events in **batches of 20 style IDs** for all 5,710,991 live styles (about **285,000 events**). They went through the same corrected code path as normal traffic. It was run **overnight**, away from peak traffic. Each run retried only the styles that had failed before.
+
+| Run | Styles sent | Refreshed | Rejected by rate limit |
 |---|---|---|---|
 | 1 | 5,710,991 | 1,279,840 | 4,431,151 |
 | 2 | 4,431,151 | 950,940 | 3,480,211 |
 | 3 | 3,480,211 | 757,780 | 2,722,431 |
 | 4 | 2,722,431 | 2,722,311 | 120 |
 | 5 | 120 | 120 | 0 |
-| **Total** | **5,710,991** | **5,710,991 (100%)** | **0** |
 
-**What you learned (straight from the report; this is the story interviewers love):**
-- **The initial limit of 180 RPM per pod was too low** for 5.7M styles. Run 1 succeeded for only about 22%.
-- **Batch granularity hurt:** most batches contained at least one style needing an Accio call, so **one rate-limit rejection failed the whole batch**.
-- **The breakthrough in run 4:** adding **4 ms delays between event publications**, plus adjusting the rate limit, raised that run's success rate from about 22% to **99.99%**.
-- **Incremental processing:** re-running only the failed IDs is idempotent and cheap.
+**What went wrong in runs 1–3**
+- **180 RPM per pod was far too low** for this volume.
+- **Events were published as fast as possible.** The token bucket allows a burst and then only its refill rate, so it emptied within moments and almost everything after that was rejected.
+- **One rejection failed a whole batch.** Most batches of 20 had at least one style needing an Accio call, so one rejected call failed all 20.
 
-**Interview angle: why did adding a delay help so much?**
-- A token bucket lets through a burst up to its capacity, then refills at a steady rate. Publishing 285k events as fast as possible **drained the bucket instantly**, and most events after that were rejected.
-- A 4 ms gap between publishes **smooths the arrival rate** to roughly the refill rate. That's client-side pacing, the same idea as a leaky bucket.
-- **Rule of thumb:** match the producer's rate to the consumer's sustained capacity, and don't rely on the limiter to absorb unbounded bursts.
+**What fixed it in run 4:** a **4 ms pause between published events**, plus a raised rate limit. Pacing made events arrive at roughly the rate the bucket refills, so they stopped being rejected. Success jumped from ~22% to **99.99%**. Run 5 cleared the last 120.
 
-### 3.7 Testing and verification
-- **Before/after screenshots:** related styles showed different ratings before the fix and the same aggregated rating after.
-- Cache inspection: related-style sets present for both styles after running the fix.
-- A **memory leak test** and a **load test** both passed before rollout.
+**The lesson to say out loud:** "Work out the throughput budget first — pods × per-pod limit — and pace the producer to match it. Don't rely on the rate limiter to absorb an unlimited burst."
 
-### 3.8 Impact
+**What you'd do differently** *(prep)*
+- Calculate the safe publish rate up front and pace from run 1.
+- On a batch failure, retry the failed styles individually instead of failing all 20.
+- Save progress checkpoints automatically rather than tracking runs by hand.
 
-| Type | Impact |
-|---|---|
-| User | One consistent rating across all colour and size variants; no more "No Ratings" on new variants; better purchase decisions |
-| Data | 100% of 5.7M styles refreshed; fully automated (no manual intervention); an update reaches **all related styles instantly** after a new rating, with no significant latency cost because processing is async |
-| DB | **2 → 1 queries / connections** per aggregated-ratings computation (**50%**) |
-| Downstream | Bulk calls (20 per batch) cut the RPM to Accio; the rate limiter protects it during spikes |
-| Reliability | The error queue gives eventual consistency instead of data loss |
+**Back-of-envelope** *(prep, illustrative pod count)*: 5.71M ÷ 20 ≈ 285k batches. With 10 pods at 180 RPM, Accio-bound throughput is 1,800 batches per minute, so about 160 minutes if every batch needs Accio. Calculating this first tells you how long the job takes and what pacing to use.
 
----
+### 4.7 Testing and impact
 
-## 4. Additional contributions
+**Testing:** before/after screenshots (related styles went from different ratings to the same one), cache inspection showing related sets present, and a passing **load test** and **memory-leak test** before rollout.
 
-**4.1 Bug fix: ratings mismatch between PDP sections.**
-- **The bug:** the **reviews section** of the PDP showed a non-refreshed rating that differed from the aggregated rating in the **ratings section**. They were two caches out of sync.
-- **The fix:** also refresh the reviews-section cache on the **get-ratings cache miss** path and the **set-rating** path.
-- **The lesson:** in distributed systems, *every* cached copy of a value must be updated on the same triggers, or the copies drift apart.
-
-**4.2 Hacker Ramp (Myntra's Gen AI hackathon).**
-- **The team's project:** a platform that helps engineers understand **which services talk to which, through which APIs**.
-- **Your part:** a feature that **parses API definitions from GitHub raw links**, to build the service-dependency view automatically.
-
-**4.3 Big Fashion Festival sale support.**
-- Myntra's biggest traffic event.
-- You **monitored the system** and **helped debug live issues** during the sale.
-- **Zomato tie-in:** this is the same as NYE or IPL peak readiness. Talk about watching dashboards for error rates, latency and cache hit ratio during peak.
+**Impact:**
+- **Users:** one consistent rating across all variants; no more "No Ratings" on new colours.
+- **Data:** 100% of 5.7M styles refreshed, fully automated; a new rating reaches all related styles straight away, without slowing the user's request because it runs asynchronously.
+- **Database:** 2 → 1 queries per computation.
+- **Accio:** bulk calls cut its request rate; the limiter protects it during spikes.
+- **Reliability:** the error queue means rejected work is retried, not lost.
 
 ---
 
-## 5. Deep-dive questions with answers
+## 5. Smaller contributions
 
-**Q1. Walk me through the aggregated ratings design.**
-Use section 3.3, in this order:
-1. The problem, with the 4.4 vs 4.3 example.
-2. The two flows: read and write.
-3. Accio bulk fetch.
-4. Related set cached for 7 days.
-5. The single query, with aggregation in Go.
-6. Write the aggregate to *all* related styles.
-7. Rate limiter, error queue, warmup.
+**Ratings mismatch bug.** The PDP's **reviews section** showed an old rating while the **ratings section** showed the new aggregate. They read from two different caches and only one was refreshed. You made the reviews-section cache refresh on the same two triggers (a cache miss on get-ratings and a new set-rating). *Lesson:* every cached copy of a value must be updated on the same events, or the copies drift apart.
 
-Aim for 2 minutes.
+**Hacker Ramp (Myntra's Gen AI hackathon).** The team built a tool that shows which internal services call which, and through which APIs. Your part parsed **API definitions from GitHub raw links** to build that dependency map automatically.
 
-**Q2. How do you compute the aggregate correctly?**
-A histogram merge across the cluster: sum the per-star counts, then compute a weighted average (section 3.5). Never average the averages.
-
-**Q3. What was the trickiest bug?**
-The **CASE ordering bug caused by Go's randomised map iteration** (section 3.2, issue 3).
-- **Why it was hard:** it was non-deterministic; the same input gave different groupings on different runs.
-- **The fixes:**
-  - Removed the CASE mapping from SQL entirely.
-  - Fetch per-style rows with one parameterised query.
-  - Do the mapping in Go, where overlapping memberships are handled explicitly.
-- **The general lesson:** never depend on Go map order. If order matters, sort the keys (`sort.Slice` over the keys) first.
-
-**Q4. Why move aggregation from SQL into Go? Isn't the DB faster at aggregating?**
-- The data per request is small: a cluster's styles × 5 ratings.
-- SQL needed **dynamic, string-built CASE maps** that were buggy, untestable and couldn't express overlapping memberships.
-- Go code is **unit-testable**, takes a parameterised query (no SQL-injection risk), and saves a round trip.
-- **Trade-off:** more rows cross the network (per style instead of per group). That's fine at this scale. For huge clusters you'd reconsider.
-
-**Q5. Why a rate limiter on Accio, and why a token bucket?**
-- **Why limit at all:** Accio is a shared internal dependency. Cache misses (especially after deploys) or a warmup could flood it and hurt every other caller.
-- **Why a token bucket:**
-  - It allows short bursts up to the bucket size while enforcing an average rate.
-  - It's cheap: 2 numbers per limiter.
-  - The team **already had the framework**.
-- **Per pod vs global:**
-  - **The catch:** each pod has its own limit, so the total RPM is the per-pod limit × the number of pods. It changes with autoscaling.
-  - **For a strict global cap:** use a distributed limiter (Redis/Aerospike counters) or have Accio enforce a quota.
-
-**Q6. Why an error queue, and what are its weaknesses?**
-- **Why:** rate-limited events would otherwise be dropped. Parking them gives **eventual consistency**.
-- **Weakness:** the **retries were instant**, because Go services had no delay function available. That risks a **retry storm**: retries hit the same exhausted limiter and fail again.
-- **Improvements:**
-  - **Delayed retry topics** (e.g., retry-1m, retry-10m), consumed only after a delay.
-  - **Exponential backoff with jitter.**
-  - A **max-attempts** limit followed by a dead-letter queue.
-  - Alerting on error-queue depth.
-- Saying this unprompted shows maturity.
-
-**Q7. How do you keep the cache consistent with the DB?**
-- **Write flow:** the DB update is followed by an async recompute that **overwrites the cache entry for every related style**.
-- **Read miss:** a full recompute.
-- **TTL of 7 days** as a safety net.
-- **Edge case: concurrent ratings on two styles in the same cluster.** Each recompute reads the **current DB state** and overwrites the whole cluster, so the last writer leaves a correct, recent value. It's eventually consistent and self-healing.
-- **Edge case: a new variant added to a cluster.**
-  - Accio is the source of truth. The new style misses in the cache, and the read flow fetches its related set and recomputes.
-  - Existing members pick up the change on their next write or TTL expiry.
-  - **Improvement:** subscribe to Accio's change events for immediate invalidation.
-
-**Q8. Why cache the related-styles set separately?**
-- It changes rarely, and it's needed on every recompute.
-- Caching it (7-day TTL) avoids calling Accio on every rating and lowers RPM.
-- It's written *before* the aggregate is computed, so later requests in the same cluster hit the cache.
-
-**Q9. How did you run a 5.7M-item backfill safely in production?**
-1. **Deployed overnight**, outside peak traffic.
-2. Event-driven batches of 20 through the **same production code path**, so no special-case logic.
-3. Rate limited, to protect Accio.
-4. **Idempotent** refreshes, so re-running is safe.
-5. **Re-ran only the failures** each time.
-6. Tuned it with **publish pacing (4 ms)** and an adjusted rate limit.
-7. Tracked progress per run: 5 runs to reach 100%.
-
-**What you'd do differently:**
-- Compute the safe publish rate up front: total pods × per-pod RPM. Pacing from the start would have avoided runs 1–3.
-- Use **smaller effective batches**, or retry the failed styles individually, so one rejection doesn't fail all 20.
-- Checkpoint progress automatically.
-
-**Q10. What's your back-of-envelope for the warmup?**
-- 5.71M styles ÷ 20 per batch ≈ **285.5k batch events**.
-- Accio's capacity is the limit. At, say, P pods × R RPM per pod (180 at first), Accio-bound throughput is **P × R batches per minute**.
-- Example: with 10 pods (illustrative, not from the report), that's 1,800 batches/min, about 160 minutes for every batch that needs Accio.
-- The point: compute the drain time and pace the producer to match, rather than discovering it through rejections.
-
-**Q11. How would this design change at Zomato?**
-The same pattern fits **restaurant ratings across outlets of the same brand**, or **dish ratings across menu variants**:
-- A relationship service (like Accio) is the source of truth for the grouping.
-- A cache holds aggregates with TTLs.
-- Updates are event-driven, and calls to shared services are rate-limited.
-- A warmup runs before launch.
-
-At Zomato's scale, Redis or Aerospike for the cache, Kafka for events, and per-city partitioning.
-
-**Q12. Why Go for this service?**
-It was the service's existing language. Beyond that, Go suits this work well:
-- Cheap goroutines for concurrent I/O (Accio calls, DB, cache).
-- Simple deployment as a static binary.
-- Strong standard library (`database/sql` with pooling, `context` timeouts).
-- **Gotchas you hit:** randomised map iteration, and no built-in delayed retry in the queue client.
-
-**Q13. What does `COALESCE` do, and why `LEFT JOIN`?**
-- **`LEFT JOIN`** keeps every rating row even when the style has no reviews.
-- **`COALESCE(x, 0)`** turns the resulting NULLs into 0.
-- **`COUNT(DISTINCT ...)`** is needed because joining images and videos multiplies the rows. Without DISTINCT, the review counts would be inflated (the fan-out / join-multiplication problem).
-
-**Q14. What did you learn?**
-- Design for downstream protection: bulk calls, rate limiting, error queues.
-- Warm caches before launches.
-- Every cached copy must be updated on the same triggers (the ratings mismatch bug).
-- Non-determinism in Go maps.
-- Operating safely in production during a major sale.
+**Big Fashion Festival.** Myntra's biggest sale. You monitored the service and helped debug live issues. What to watch during a peak: error rate, latency (p99), cache hit ratio, queue depth. *Zomato link:* this is the same as New Year's Eve or IPL-final peak readiness.
 
 ---
 
-## 6. STAR stories from this internship
+## 6. The ten questions most likely to come up
 
-**Story A: Fixing aggregated ratings at scale** (for "a challenging problem", "a project you're proud of")
-- **S:** Variants of the same product showed different or missing ratings on Myntra's PDP. Related styles weren't refreshed in the cache when a rating changed.
-- **T:** Make every style in a cluster show one correct aggregated rating automatically, across 5.7M live styles, without overloading shared services.
-- **A:**
-  1. Fixed both the read and write flows to fetch related sets from Accio in batches of 20 and cache them (7-day TTL).
-  2. Recomputed and wrote the aggregate to every style in the cluster.
-  3. Added a token-bucket limiter and a Kafka error queue.
-  4. Rewrote two CASE-based queries into one parameterised query, with aggregation in Go.
-  5. Ran a 5.7M-style cache warmup overnight.
-- **R:**
-  - 100% of 5,710,991 styles refreshed, with consistent ratings across variants.
-  - 50% fewer DB connections per computation.
-  - No manual intervention needed.
-  - Load and memory-leak tests passed.
+**1. "Walk me through the design."** Problem with the 4.4 vs 4.3 example → read and write paths both broken → Accio bulk fetch → cache the related set → one query, aggregate in Go → write to every style → limiter, error queue, warmup. About two minutes, then stop and let them pick.
 
-**Story B: The non-deterministic SQL bug** (for "a hard bug", "debugging")
-- **S:** During testing, some clusters' aggregates were wrong, and *which* ones changed between runs.
-- **T:** Find out why the grouping was non-deterministic.
-- **A:**
-  1. Traced it to the generated SQL `CASE` clauses.
-  2. The first-match-wins semantics, combined with Go's randomised map iteration, meant main IDs that also appeared in another main ID's related list were sometimes absorbed into the wrong group.
-  3. Replaced SQL-side mapping with one parameterised query and deterministic Go-side aggregation that handles overlaps.
-- **R:** Correct grouping every time, 2 → 1 queries, and code that is testable and injection-safe.
+**2. "Why move aggregation from SQL into Go? Isn't the database faster?"** Each request's data is small (a cluster's styles × 5 star values). The SQL version needed `CASE` maps built as strings, which were buggy, untestable and couldn't express a style in two groups. The Go version is deterministic, testable, parameterised and saves a round trip. Trade-off: more rows travel over the network. Fine at this size; for very large clusters you'd reconsider.
 
-**Story C: The warmup that failed 78% of the time at first** (for "a failure", "resilience", "learning from mistakes")
-- **S:** Run 1 of the 5.7M warmup refreshed only 1.28M styles; 4.43M were rejected by the rate limit.
-- **T:** Finish the warmup without hurting Accio.
-- **A:**
-  1. Analysed the cause: the bucket drained instantly, and one rejection failed a whole batch of 20.
-  2. Re-ran only the failures.
-  3. Added a 4 ms pacing delay between publishes and adjusted the per-pod limit.
-- **R:**
-  - Run 4 hit 99.99% success; run 5 cleared the last 120.
-  - 100% after 5 runs.
-  - **The lesson:** calculate the throughput budget up front and pace the producer.
+**3. "What was the trickiest bug?"** The `CASE` ordering bug (section 4.4). Say why it was hard: it was non-deterministic. Say the general lesson: **never depend on Go map order**; if order matters, sort the keys first.
 
-**Story D: Production during the Big Fashion Festival sale** (for "working under pressure")
-Monitored the service and helped debug live issues during Myntra's highest-traffic event. Learned what to watch (errors, latency, cache hit ratio) and how to respond fast.
+**4. "Why a token bucket, and why per pod?"** It allows short bursts but caps the average, it's cheap, and the team already had it. Per pod is simple but means the total limit scales with pod count; for a strict global limit use a shared counter or a quota at Accio.
+
+**5. "What are the weaknesses of your error queue?"** Retries were **instant** because the Go services had no delay function available. Instant retries hit the same empty bucket and fail again (a *retry storm*). Improvements: delayed retry topics (retry-after-1-minute, retry-after-10-minutes), exponential backoff with jitter, a maximum attempt count followed by a dead-letter queue, and an alert on error-queue size. Raising this yourself shows maturity.
+
+**6. "How do you keep the cache consistent with the database?"** On every write, an async recompute reads the current DB state and overwrites the entry for **every** style in the cluster. A cache miss triggers a full recompute. The 7-day TTL is a safety net.
+- *Two people rate two styles of the same cluster at the same moment?* Each recompute reads the latest DB state and overwrites the whole cluster, so whichever finishes last writes a correct, up-to-date value.
+- *A new colour is added?* It misses the cache, so the read path fetches its related set from Accio and computes the aggregate. Older siblings pick up the change on their next rating or TTL expiry. Improvement: listen to Accio's change events and invalidate immediately.
+
+**7. "Why cache the related-styles set separately?"** It rarely changes and is needed for every recompute; caching it avoids calling Accio on every rating.
+
+**8. "How did you run a 5.7M backfill safely in production?"** Overnight; same code path as live traffic; batches of 20; rate limited; idempotent, so re-running is safe; retried only failures; tuned with pacing. Then add what you'd do differently (section 4.6).
+
+**9. "50% fewer DB connections — 50% of what?"** "For each aggregated-rating computation, two queries became one, so one DB round trip instead of two. It's not a service-wide figure." Say it exactly like this; don't let it sound bigger than it was.
+
+**10. "How would this apply at Zomato?"** The same pattern fits **restaurant ratings across outlets of one brand** or **dish ratings across menu variants**: a source-of-truth service for the grouping, a cache of aggregates with TTLs, event-driven updates, a rate limit on shared services, and a warmup before launch.
+
+**Possible extra: "Why Go?"** It was the service's language, and it suits I/O-heavy work: cheap goroutines for concurrent calls, a strong standard library (`database/sql` connection pooling, `context` for timeouts) and a single static binary to deploy. Two Go gotchas you hit: random map order, and no built-in delayed retry.
 
 ---
 
-## 7. Resume line → report mapping (so your answers match your resume)
+## 7. Three STAR stories
 
-| Resume bullet | What the report shows |
-|---|---|
-| "Scalable aggregated ratings pipeline using Go and MySQL, leveraging bulk APIs, cache warmup, rate limiting, and error queues … 5.7 million products" | Project 2, sections 3.3–3.6: Accio bulk (20/batch), 5.7M warmup in 5 runs, token bucket per pod, Kafka error queue |
-| "Optimized database queries and cache access patterns, reducing database connections by 50%" | Section 3.5: **2 queries → 1** for ratings, reviews and image counts (1 connection instead of 2); cache-first related sets |
-| "Production-parity stage environment … MySQL, Aerospike, Kafka, and downstream services" | Project 1, section 2: configs and timeouts, MySQL schema plus mock data, Aerospike provisioning, Airbus and DB credentials in Vault, deploy and test |
+**A. Consistent ratings at scale** (*"a project you're proud of"*, *"a hard problem"*)
+- **Situation:** variants of the same product showed different or missing ratings; related styles were never refreshed.
+- **Task:** one correct rating across every variant, for 5.7M styles, without overloading shared services.
+- **Action:** fixed both paths to fetch related sets from Accio in batches of 20 and cache them; wrote the aggregate to every style; added a token-bucket limiter and a Kafka error queue; merged two queries into one with aggregation in Go; ran a 5.7M warmup overnight.
+- **Result:** 100% of 5,710,991 styles refreshed, consistent ratings, half the DB round trips for the computation, no manual work, load and memory tests passed.
 
-> **Be precise about the 50%:** it's "50% fewer DB round trips/connections **for the aggregated-ratings computation**", from merging two queries into one. It is **not** a service-wide 50% connection reduction. If asked "50% of what?", say exactly that.
+**B. The bug that came and went** (*"a hard bug"*, *"debugging"*)
+- **S:** in testing, some clusters had wrong aggregates, and *which* ones changed between runs.
+- **T:** find the source of the randomness.
+- **A:** traced it to the generated `CASE` clauses: first-match-wins plus Go's random map order put shared IDs into the wrong group. Replaced the SQL mapping with one parameterised query and deterministic grouping in Go.
+- **R:** correct every time, one query instead of two, testable and injection-safe.
+
+**C. The warmup that failed 78% at first** (*"a failure"*, *"learning from a mistake"*)
+- **S:** warmup run 1 refreshed only 1.28M of 5.71M styles; the rest were rate-limited.
+- **T:** finish without hurting Accio.
+- **A:** found that publishing unpaced emptied the bucket and one rejection failed a whole batch; re-ran only failures; added a 4 ms pause between events and raised the limit.
+- **R:** 99.99% in run 4, 100% after run 5. Lesson: compute the throughput budget first and pace the producer.
+
+**Rules:** 60–90 seconds each. Say "I" for your own work and "we" for the team's. End with a number. Have one "what I'd do differently" ready.
