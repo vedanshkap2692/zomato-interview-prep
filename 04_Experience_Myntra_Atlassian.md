@@ -97,7 +97,7 @@ She built it: pointed the service at the stage versions of everything it talks t
 - **"Walk me through it."** Problem (4.4 vs 4.3 vs "No Ratings") → why it broke → Accio in batches of 20 → cache the sibling list → combined rating written to every style → rate limiter and error queue → SQL bug and 2→1 queries → warmup. Two minutes, then stop.
 - **"Why move grouping out of SQL into Go?"** The data per request is small; the SQL version was built from strings, buggy and untestable; Go is predictable, testable and saves a round trip.
 - **"How does the cache stay in sync with the database?"** Every new rating recomputes from the database and overwrites every style in the cluster; a miss triggers a full recompute; the 7-day TTL is a safety net.
-- **"What if two people rate two colours at the same moment?"** Each recompute reads the latest database state and overwrites the whole cluster, so whichever finishes last writes a correct, current value.
+- **"What if two people rate two colours at the same moment?"** Each recompute reads the database and overwrites the whole cluster. Usually the later one wins, but a recompute that read the database earlier can finish later and overwrite a newer value with an older one. The TTL and the next rating heal it; the proper fix is to store a version (the latest rating ID it was built from) and write to the cache only if it's newer.
 - **"How would this apply at Zomato?"** Ratings across outlets of one restaurant brand, or across variants of a dish — same pattern.
 
 ---
