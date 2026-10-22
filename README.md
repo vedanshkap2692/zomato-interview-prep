@@ -9,6 +9,8 @@
 | 3 | `03_Projects_TraceX_SupplySenseAI.md` | 25-minute read, code-verified: what each project does, architecture, what you built, every term explained simply, weak spots, likely questions | Days 4–7 |
 | 4 | `04_Experience_Myntra_Atlassian.md` | 25-minute read: Myntra and Atlassian explained simply (SQS, worker pools, idempotency, token bucket, caching), likely questions, STAR stories | Days 1–4 |
 | 5 | `05_Myntra_Deep_Dive.md` | 30-minute read, verified from the internship report: background terms, stage onboarding, aggregated-ratings design, the SQL bug, the 5.7M warmup, top 10 questions, 3 STAR stories | Days 1–3 |
+| 6 | `06_System_Design_Master.md` | System design taught from zero: scaling, load balancers, SQL vs NoSQL, indexes, replication, sharding, consistent hashing, CAP, caching, queues and Kafka, idempotency, outbox, real-time, reliability, locking, geo, search, estimation, LLD patterns; check-yourself Q&A after every part | Read before 07 |
+| 7 | `07_System_Design_QA.md` | Solution sheet: 21 HLD questions (food delivery, tracking, dispatch, rate limiter, notifications, payments, seat booking, Blinkit inventory, coupons…), 6 LLD/schema questions with code, 40 rapid-fire follow-ups | Practise one design a day |
 
 **Round 1 for an off-campus fresher (2024–26 reports):**
 1. A 20–40 minute deep dive into your resume and internships.
