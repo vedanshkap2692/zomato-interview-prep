@@ -991,3 +991,449 @@ int trailingZeroes(int n) { int c = 0; while (n) { n /= 5; c += n; } return c; }
 | ≈ 10³–10⁴ | O(n²) |
 | ≈ 20 | O(2ⁿ) bitmask |
 | ≈ 10 | O(n!) |
+
+---
+
+## 12. Round 2 additions (from research on Zomato Round 2 reports, 2023–26)
+
+> **Why this section exists:** Round 2 at Zomato is usually with an EM or Team Lead and mixes resume grilling, design and 1–2 DSA problems. The DSA is often **a small data structure for a product feature**, written as a clean, thread-safe class: rate limiters, "orders in the last X minutes", a percentile tracker, Ctrl+R search, a "restaurants open now" index. Hard problems still appear (Jump Game IV with a weighted follow-up, constrained shortest path, a hard DP). Report IDs (Z2, Z7…) refer to `sources/interview_reports.md` and the Round 2 notes summarised in `01_Zomato_Interview_Guide.md` section 0.
+>
+> **How to practise these:** write each as a class with clear public/private methods and a lock where it applies, then say the complexity, two alternative approaches, and the follow-up ("concurrent?", "weighted?", "10× bigger?").
+
+### 12.1 Rate limiters as classes: the most repeated Round 2 coding item (Z2, Z5, Z7)
+
+```cpp
+// Common interface so the interviewer sees you can swap algorithms (Strategy pattern)
+struct RateLimiter { virtual bool allow(const string& key, long long nowMs) = 0; virtual ~RateLimiter() {} };
+
+// (a) Token bucket: capacity B, refill R tokens/second. Allows bursts up to B, caps the average at R.
+class TokenBucketLimiter : public RateLimiter {
+    double cap, ratePerMs;
+    struct B { double tokens; long long last; };
+    unordered_map<string, B> buckets; mutex m;
+public:
+    TokenBucketLimiter(double capacity, double perSec) : cap(capacity), ratePerMs(perSec / 1000.0) {}
+    bool allow(const string& key, long long now) override {
+        lock_guard<mutex> g(m);
+        auto it = buckets.find(key);
+        if (it == buckets.end()) it = buckets.emplace(key, B{cap, now}).first;
+        B& b = it->second;
+        b.tokens = min(cap, b.tokens + (now - b.last) * ratePerMs);   // lazy refill, no timer thread
+        b.last = now;
+        if (b.tokens >= 1) { b.tokens -= 1; return true; }
+        return false;
+    }
+};
+
+// (b) Fixed window: counter per (key, window). Simplest, but allows 2x limit across a window edge.
+class FixedWindowLimiter : public RateLimiter {
+    int limit; long long winMs;
+    unordered_map<string, pair<long long,int>> m; mutex mu;           // key -> {window id, count}
+public:
+    FixedWindowLimiter(int l, long long w) : limit(l), winMs(w) {}
+    bool allow(const string& key, long long now) override {
+        lock_guard<mutex> g(mu);
+        auto& [win, cnt] = m[key];
+        long long cur = now / winMs;
+        if (win != cur) { win = cur; cnt = 0; }
+        if (cnt >= limit) return false;
+        ++cnt; return true;
+    }
+};
+
+// (c) Sliding window log: exact, memory O(limit) per key.
+class SlidingLogLimiter : public RateLimiter {
+    int limit; long long winMs;
+    unordered_map<string, deque<long long>> logs; mutex mu;
+public:
+    SlidingLogLimiter(int l, long long w) : limit(l), winMs(w) {}
+    bool allow(const string& key, long long now) override {
+        lock_guard<mutex> g(mu);
+        auto& q = logs[key];
+        while (!q.empty() && q.front() <= now - winMs) q.pop_front();   // drop timestamps outside the window
+        if ((int)q.size() >= limit) return false;
+        q.push_back(now); return true;
+    }
+};
+
+// (d) Sliding window counter: O(1) memory, close approximation (Cloudflare's approach).
+//     estimate = prevCount * (fraction of previous window still inside the sliding window) + curCount
+class SlidingCounterLimiter : public RateLimiter {
+    int limit; long long winMs;
+    struct W { long long id = -1; int cur = 0, prev = 0; };
+    unordered_map<string, W> m; mutex mu;
+public:
+    SlidingCounterLimiter(int l, long long w) : limit(l), winMs(w) {}
+    bool allow(const string& key, long long now) override {
+        lock_guard<mutex> g(mu);
+        W& w = m[key];
+        long long id = now / winMs;
+        if (id != w.id) {                                  // moved into a new window
+            w.prev = (id == w.id + 1) ? w.cur : 0;         // more than one window passed -> nothing carries over
+            w.cur = 0; w.id = id;
+        }
+        double elapsed = double(now % winMs) / winMs;
+        double est = w.prev * (1.0 - elapsed) + w.cur;
+        if (est >= limit) return false;
+        ++w.cur; return true;
+    }
+};
+```
+**Follow-ups they ask:**
+- *Fixed window's flaw?* 100 requests at 11:59:59 plus 100 at 12:00:00 means 200 in two seconds. Sliding log fixes it exactly; sliding counter fixes it approximately in O(1) memory.
+- *Many servers?* Move the state to Redis: `INCR` + `EXPIRE` for fixed window, a Lua script for token bucket so read-modify-write is atomic. If Redis is down, fail open (most APIs) or fail closed (login/OTP).
+- *One global mutex is a bottleneck?* Shard the map into N stripes, each with its own lock (lock striping), or keep a lock per bucket.
+- *Memory grows with keys?* Evict idle keys (e.g. LRU, or delete keys not seen for a few windows).
+
+**LC 359 Logger Rate Limiter (warm-up):**
+```cpp
+class Logger {
+    unordered_map<string, int> last;                       // message -> last printed timestamp
+public:
+    bool shouldPrintMessage(int ts, const string& msg) {
+        auto it = last.find(msg);
+        if (it != last.end() && ts - it->second < 10) return false;
+        last[msg] = ts; return true;
+    }
+};
+```
+**"Orders in the last X minutes" (Z7):** see 1.5 (circular buckets with timestamps). In Round 2, add a `mutex` (or Java `ReentrantLock`) around `hit` and `count`, and say why: two threads incrementing the same bucket lose updates otherwise.
+
+### 12.2 Percentile price tracker: "suggest a price between the 1/3 and 2/3 percentiles" (Z6)
+
+The generalised two-heaps idea: keep the bottom third, the middle and the top third in three ordered groups, with every element of `lo` ≤ every element of `mid` ≤ every element of `hi`.
+```cpp
+class PercentileTracker {
+    multiset<int> lo, mid, hi;                             // multisets give O(log n) min and max of each group
+    void rebalance() {
+        size_t n = lo.size() + mid.size() + hi.size(), t = n / 3;
+        while (lo.size() > t) { mid.insert(*lo.rbegin()); lo.erase(prev(lo.end())); }
+        while (hi.size() > t) { mid.insert(*hi.begin());  hi.erase(hi.begin()); }
+        while (lo.size() < t) { lo.insert(*mid.begin());  mid.erase(mid.begin()); }
+        while (hi.size() < t) { hi.insert(*mid.rbegin()); mid.erase(prev(mid.end())); }
+    }
+public:
+    void add(int price) {
+        if (!lo.empty() && price < *lo.rbegin()) lo.insert(price);
+        else if (!hi.empty() && price > *hi.begin()) hi.insert(price);
+        else mid.insert(price);
+        rebalance();
+    }
+    pair<int,int> suggestRange() const { return {*mid.begin(), *mid.rbegin()}; }   // any price in here is fine
+};
+```
+**Complexity:** O(log n) per insert, O(1) query. **Say the progression:** sort every time O(n log n) → this. With heaps instead of multisets, use a max-heap for `lo`, a min-heap for `hi`, and two heaps for `mid`; multisets are simpler in C++. Deletions (a dish removed) are easy with multisets; with heaps you need lazy deletion.
+
+### 12.3 Jump Game IV, weighted follow-up: "now each step has a cost" (Z2)
+
+The unweighted version is BFS (3.5). With costs, BFS is wrong; use Dijkstra. Same-value teleports create O(k²) edges for k equal values, so add one **virtual node per value**: i → V(value) costs 0, V(value) → j costs the landing cost.
+```cpp
+// landCost[j] = cost of landing on index j by any move (an assumed cost model; confirm with the interviewer)
+long long minCostJump(const vector<int>& a, const vector<long long>& landCost) {
+    int n = a.size();
+    unordered_map<int, int> vid; for (int x : a) if (!vid.count(x)) { int id = n + vid.size(); vid[x] = id; }
+    int N = n + vid.size();
+    vector<vector<pair<int,long long>>> g(N);
+    for (int i = 0; i < n; i++) {
+        if (i > 0)     g[i].push_back({i - 1, landCost[i - 1]});
+        if (i + 1 < n) g[i].push_back({i + 1, landCost[i + 1]});
+        int v = vid[a[i]];
+        g[i].push_back({v, 0});                            // step into the "teleport hub" for this value
+        g[v].push_back({i, landCost[i]});                  // hub to any index with the same value
+    }
+    vector<long long> d(N, LLONG_MAX); d[0] = 0;
+    priority_queue<pair<long long,int>, vector<pair<long long,int>>, greater<>> pq; pq.push({0, 0});
+    while (!pq.empty()) {
+        auto [du, u] = pq.top(); pq.pop();
+        if (du > d[u]) continue;
+        if (u == n - 1) return du;
+        for (auto [v, w] : g[u]) if (du + w < d[v]) { d[v] = du + w; pq.push({d[v], v}); }
+    }
+    return -1;
+}
+```
+**Complexity:** O(n log n) with the virtual nodes (O(n) edges), versus O(k² log n) without them.
+
+### 12.4 Topological order uniqueness: LC 444 Sequence Reconstruction (Blinkit R2, B3)
+
+"Is `nums` the only shortest supersequence of these sequences?" means "is there exactly one topological order, and is it `nums`?". In Kahn's algorithm, the order is unique only if the queue never holds more than one node.
+```cpp
+bool sequenceReconstruction(vector<int>& nums, vector<vector<int>>& seqs) {
+    int n = nums.size();
+    vector<vector<int>> g(n + 1); vector<int> indeg(n + 1, 0);
+    for (auto& s : seqs)
+        for (int i = 0; i + 1 < (int)s.size(); i++) { g[s[i]].push_back(s[i + 1]); indeg[s[i + 1]]++; }
+    queue<int> q; for (int v = 1; v <= n; v++) if (indeg[v] == 0) q.push(v);
+    int idx = 0;
+    while (!q.empty()) {
+        if (q.size() > 1) return false;                    // two choices -> more than one valid order
+        int u = q.front(); q.pop();
+        if (nums[idx++] != u) return false;
+        for (int v : g[u]) if (--indeg[v] == 0) q.push(v);
+    }
+    return idx == n;                                       // all placed (no cycle)
+}
+```
+Free practice substitute if premium: LC 2392 Build a Matrix With Conditions (two topological sorts).
+
+### 12.5 Trie for product search: LC 1268 Search Suggestions, and Ctrl+R (Z29, N11)
+
+```cpp
+// LC 1268: each node keeps up to 3 product indices, inserted in sorted order
+struct SNode { SNode* ch[26] = {}; vector<int> top; };
+vector<vector<string>> suggestedProducts(vector<string>& products, string word) {
+    sort(products.begin(), products.end());
+    SNode* root = new SNode();
+    for (int i = 0; i < (int)products.size(); i++) {
+        SNode* cur = root;
+        for (char c : products[i]) {
+            if (!cur->ch[c - 'a']) cur->ch[c - 'a'] = new SNode();
+            cur = cur->ch[c - 'a'];
+            if (cur->top.size() < 3) cur->top.push_back(i);
+        }
+    }
+    vector<vector<string>> res; SNode* cur = root;
+    for (char c : word) {
+        cur = cur ? cur->ch[c - 'a'] : nullptr;
+        vector<string> row;
+        if (cur) for (int i : cur->top) row.push_back(products[i]);
+        res.push_back(row);
+    }
+    return res;
+}
+
+// Ctrl+R: return the most recent command starting with the typed text.
+// Each node stores the index of the latest command passing through it. O(L) add and query.
+class CommandHistory {
+    struct Node { unordered_map<char, Node*> ch; int latest = -1; };
+    Node root; vector<string> cmds;
+public:
+    void add(const string& cmd) {
+        int id = cmds.size(); cmds.push_back(cmd);
+        Node* cur = &root; cur->latest = id;
+        for (char c : cmd) {
+            if (!cur->ch.count(c)) cur->ch[c] = new Node();
+            cur = cur->ch[c]; cur->latest = id;
+        }
+    }
+    string search(const string& typed) const {
+        const Node* cur = &root;
+        for (char c : typed) { auto it = cur->ch.find(c); if (it == cur->ch.end()) return ""; cur = it->second; }
+        return cur->latest >= 0 ? cmds[cur->latest] : "";
+    }
+};
+```
+**Follow-up: real bash Ctrl+R matches anywhere in the command, not just the start.** Insert every suffix of each command into the trie (a suffix trie, O(L²) per command), or for short histories scan backwards with `find`. Say the trade-off: memory versus query speed.
+
+### 12.6 Small design classes that keep coming up
+
+```cpp
+// LC 1472 Design Browser History (Blinkit R2, B10): O(1) visit/back/forward
+class BrowserHistory {
+    vector<string> h; int cur = 0, last = 0;               // last = index of the newest valid page
+public:
+    BrowserHistory(string home) { h.push_back(home); }
+    void visit(string url) {
+        if (++cur < (int)h.size()) h[cur] = url; else h.push_back(url);
+        last = cur;                                        // forward history is discarded
+    }
+    string back(int steps)    { cur = max(0, cur - steps);    return h[cur]; }
+    string forward(int steps) { cur = min(last, cur + steps); return h[cur]; }
+};
+
+// O(1) push / pop / getMin / getMax (the trick a candidate missed and was rejected for, Z16)
+class MinMaxStack {
+    stack<array<int,3>> st;                                // {value, min so far, max so far}
+public:
+    void push(int x) {
+        if (st.empty()) st.push({x, x, x});
+        else st.push({x, min(x, st.top()[1]), max(x, st.top()[2])});
+    }
+    void pop() { st.pop(); }
+    int top()    { return st.top()[0]; }
+    int getMin() { return st.top()[1]; }
+    int getMax() { return st.top()[2]; }
+};
+
+// LC 981 Time Based Key-Value Store: "get the value as of time t" (Redis/KV follow-ups)
+class TimeMap {
+    unordered_map<string, vector<pair<int,string>>> m;     // timestamps arrive increasing
+public:
+    void set(const string& k, const string& v, int t) { m[k].push_back({t, v}); }
+    string get(const string& k, int t) {
+        auto it = m.find(k); if (it == m.end()) return "";
+        auto& v = it->second;
+        auto p = upper_bound(v.begin(), v.end(), make_pair(t, string("\x7f")));   // first entry after t
+        return p == v.begin() ? "" : prev(p)->second;
+    }
+};
+
+// LC 701 Insert into a BST (pairs with 2.1 delete; District R2 asked insert/update/delete, Z11)
+TreeNode* insertIntoBST(TreeNode* root, int val) {
+    if (!root) return new TreeNode(val);
+    TreeNode* cur = root;
+    while (true) {
+        TreeNode*& next = val < cur->val ? cur->left : cur->right;
+        if (!next) { next = new TreeNode(val); return root; }
+        cur = next;
+    }
+}
+```
+
+### 12.7 "Which restaurants are open now?" index (District R2, Z11)
+
+One in-memory structure must answer two queries: "the slots of restaurant R" and "restaurants open at minute t". Bucket the day into 30-minute slots; each bucket lists the intervals that overlap it, so a query only checks one bucket.
+```cpp
+class OpenHoursIndex {
+    static const int SLOT = 30, NSLOT = 1440 / SLOT;
+    struct Iv { int rest, s, e; };                         // [s, e) in minutes of the day
+    unordered_map<int, vector<pair<int,int>>> slotsOf;     // restaurant -> its intervals
+    vector<vector<Iv>> bucket = vector<vector<Iv>>(NSLOT);
+    void addPiece(int r, int s, int e) {
+        slotsOf[r].push_back({s, e});
+        for (int b = s / SLOT; b <= (e - 1) / SLOT; b++) bucket[b].push_back({r, s, e});
+    }
+public:
+    void add(int r, int open, int close) {                 // close < open means it crosses midnight
+        if (close > open) addPiece(r, open, close);
+        else { addPiece(r, open, 1440); if (close > 0) addPiece(r, 0, close); }   // 22:00-02:00 -> two pieces
+    }
+    const vector<pair<int,int>>& slots(int r) { return slotsOf[r]; }
+    vector<int> openAt(int t) {
+        vector<int> res;
+        for (auto& iv : bucket[t / SLOT]) if (iv.s <= t && t < iv.e) res.push_back(iv.rest);
+        return res;                                        // dedupe with a set if a restaurant has overlapping intervals
+    }
+};
+```
+**Complexity:** a query checks one bucket, O(k) for the k intervals in it. **Alternatives to mention:** an interval tree (O(log n + k)); a sweep over sorted start/end events; or, at Zomato scale, precompute each city's open set every minute and keep it in Redis. **Edge cases:** past-midnight hours, several shifts a day (lunch and dinner), holiday overrides, the restaurant pausing itself.
+
+### 12.8 Round 2 one-offs that were actually asked
+
+```cpp
+// Longest valid parentheses SUBSEQUENCE (Z5). Not LC 32 (that is substring): greedily match pairs.
+int longestValidSubsequence(const string& s) {
+    int open = 0, pairs = 0;
+    for (char c : s) { if (c == '(') open++; else if (open > 0) { open--; pairs++; } }
+    return 2 * pairs;
+}
+
+// Flipping the Matrix (Z2): 2N x 2N, reverse any rows/columns, maximise the top-left N x N sum.
+// Each top-left cell can receive any of its 4 mirror cells, independently.
+long long flippingMatrix(const vector<vector<int>>& m) {
+    int n = m.size() / 2, L = 2 * n - 1; long long s = 0;
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++)
+            s += max({m[i][j], m[i][L - j], m[L - i][j], m[L - i][L - j]});
+    return s;
+}
+
+// Delete Fibonacci-valued nodes from a doubly linked list (Z9; the EM wanted 4-5 approaches, then clean code)
+struct DNode { int val; DNode *prev, *next; DNode(int v): val(v), prev(nullptr), next(nullptr) {} };
+DNode* deleteFibNodes(DNode* head) {
+    int mx = 0; for (DNode* p = head; p; p = p->next) mx = max(mx, p->val);
+    unordered_set<int> fib; for (long long a = 0, b = 1; a <= mx; ) { fib.insert(a); long long c = a + b; a = b; b = c; }
+    for (DNode* p = head; p; ) {
+        DNode* nxt = p->next;
+        if (fib.count(p->val)) {
+            if (p->prev) p->prev->next = p->next; else head = p->next;
+            if (p->next) p->next->prev = p->prev;
+            delete p;
+        }
+        p = nxt;
+    }
+    return head;
+}
+// Approaches to list: (1) Fibonacci set up to max, O(n + log max) - the code above;
+// (2) per node, x is Fibonacci iff 5x^2+4 or 5x^2-4 is a perfect square (O(1) each, watch overflow);
+// (3) if the list is sorted, walk the list and the Fibonacci sequence together;
+// (4) brute force: generate Fibonacci numbers per node, O(n log max). Pick (1): readable and fast.
+
+// LC 718 Longest common substring of two arrays/sentences (N11): dp[j] = length of match ending at i, j
+int findLength(vector<int>& a, vector<int>& b) {
+    vector<int> dp(b.size() + 1, 0); int best = 0;
+    for (int i = 1; i <= (int)a.size(); i++)
+        for (int j = b.size(); j >= 1; j--) {               // right to left so dp[j-1] is still the previous row
+            dp[j] = (a[i - 1] == b[j - 1]) ? dp[j - 1] + 1 : 0;
+            best = max(best, dp[j]);
+        }
+    return best;
+}
+
+// LC 1386 Cinema Seat Allocation (seat-allocation questions, Z11/N11): 4-person groups per row
+int maxNumberOfFamilies(int n, vector<vector<int>>& reserved) {
+    unordered_map<int, int> mask;                           // row -> bitmask of reserved seats 2..9
+    for (auto& r : reserved) if (r[1] >= 2 && r[1] <= 9) mask[r[0]] |= 1 << r[1];
+    int res = 2 * (n - mask.size());                        // untouched rows fit 2 groups
+    int L = 0b1111 << 2, R = 0b1111 << 6, M = 0b1111 << 4;  // seats 2-5, 6-9, 4-7
+    for (auto& [row, m] : mask) {
+        int c = (!(m & L)) + (!(m & R));
+        if (c == 0 && !(m & M)) c = 1;
+        res += c;
+    }
+    return res;
+}
+```
+
+### 12.9 Hard DP practice for "hard DP with working code" (Z1)
+
+```cpp
+// LC 72 Edit Distance
+int minDistance(const string& a, const string& b) {
+    int n = a.size(), m = b.size();
+    vector<vector<int>> dp(n + 1, vector<int>(m + 1));
+    for (int i = 0; i <= n; i++) dp[i][0] = i;
+    for (int j = 0; j <= m; j++) dp[0][j] = j;
+    for (int i = 1; i <= n; i++)
+        for (int j = 1; j <= m; j++)
+            dp[i][j] = a[i - 1] == b[j - 1] ? dp[i - 1][j - 1]
+                     : 1 + min({dp[i - 1][j - 1], dp[i - 1][j], dp[i][j - 1]});   // replace, delete, insert
+    return dp[n][m];
+}
+
+// LC 1235 Maximum Profit in Job Scheduling: sort by end, dp + binary search (hard)
+int jobScheduling(vector<int>& st, vector<int>& en, vector<int>& pr) {
+    int n = st.size(); vector<int> id(n); iota(id.begin(), id.end(), 0);
+    sort(id.begin(), id.end(), [&](int a, int b) { return en[a] < en[b]; });
+    vector<int> ends(n); for (int i = 0; i < n; i++) ends[i] = en[id[i]];
+    vector<long long> dp(n + 1, 0);                         // dp[i] = best using the first i jobs by end time
+    for (int i = 1; i <= n; i++) {
+        int j = id[i - 1];
+        int k = upper_bound(ends.begin(), ends.begin() + (i - 1), st[j]) - ends.begin();   // jobs ending <= start
+        dp[i] = max(dp[i - 1], dp[k] + pr[j]);
+    }
+    return dp[n];
+}
+```
+**The DP talk track Round 2 interviewers want:** recursion with the state named out loud → memoisation → bottom-up table → space optimisation, with the complexity at each step (District R2 asked exactly "recursion, then optimise with DP", Z13).
+
+### 12.10 Concurrency: bounded blocking queue (producer–consumer)
+
+Asked as "thread-safe queue" and as Go goroutine/channel request handling (Z22, N12). In Go this is just a buffered channel; in C++:
+```cpp
+template <typename T>
+class BoundedBlockingQueue {
+    queue<T> q; size_t cap; mutex m; condition_variable notFull, notEmpty;
+public:
+    explicit BoundedBlockingQueue(size_t c) : cap(c) {}
+    void put(T x) {
+        unique_lock<mutex> lk(m);
+        notFull.wait(lk, [&] { return q.size() < cap; });   // the predicate guards against spurious wakeups
+        q.push(move(x));
+        notEmpty.notify_one();
+    }
+    T take() {
+        unique_lock<mutex> lk(m);
+        notEmpty.wait(lk, [&] { return !q.empty(); });
+        T x = move(q.front()); q.pop();
+        notFull.notify_one();
+        return x;
+    }
+    bool offer(T x, chrono::milliseconds timeout) {         // give up after a timeout instead of blocking forever
+        unique_lock<mutex> lk(m);
+        if (!notFull.wait_for(lk, timeout, [&] { return q.size() < cap; })) return false;
+        q.push(move(x)); notEmpty.notify_one(); return true;
+    }
+};
+```
+**Say:** why `while`/predicate waits (spurious wakeups), why `notify_one` after each change, and that a bounded queue gives backpressure, the same idea as the worker pools in your Atlassian work.

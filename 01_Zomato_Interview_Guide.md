@@ -9,6 +9,105 @@
 
 ---
 
+## 0. Round 2: read this first (you cleared Round 1)
+
+> Built from a second research pass: 81 Zomato-group interview write-ups read in full (2022–26), 25 of them naming the Round 2+ DSA or confirming there was none. Counts below are "seen in N reports", not probabilities. Report IDs (Z2, B10, N11…) refer to `sources/interview_reports.md` and `sources/round2_reports.md`.
+
+### 0.1 What Round 2 looks like
+
+| | Zomato | District | Blinkit |
+|---|---|---|---|
+| **Length / interviewer** | 75–90 min; EM, Team Lead or senior engineer (sometimes SDE-2) | ~90 min | Team Lead / SDE-3 |
+| **Content** | **Mix:** resume grill ("why X over Y"), design (HLD/LLD/schema), and **1–2 DSA problems, usually "design-flavoured"** | Resume grill + custom DSA, or data-structure design + SQL + HLD, or API code | **System design on draw.io, usually no DSA** |
+| **Code** | Working code expected (some got away with pseudocode). "Logic must be right first time" (EM, Z9) | Backend code + SQL in some reports | A curl-able API in one report |
+
+**How Round 2 differs from Round 1:**
+1. **More senior interviewer**, more "why", more trade-offs. Expect to defend every tech choice on your resume.
+2. **DSA becomes a small component for a product feature**, written as a clean class: a rate limiter, "orders in the last X minutes", a percentile price tracker, Ctrl+R search, a "restaurants open now" index, an LFU cache after a Redis eviction discussion.
+3. **Hard problems still appear** with coder interviewers: a hard DP with working code (Z1), Jump Game IV plus a weighted follow-up plus rate-limiter code in 60 minutes (Z2), two medium-hard graph problems (Z10).
+4. **Concurrency shows up:** a lock around time buckets (Z7), goroutines and channels with timeouts (N12), concurrent seat requests (N11), deadlock analysis (Z11).
+
+**Round 3:** usually a VP culture fit (why Zomato, pace, Gurgaon, 5 days in office), 20–40 minutes, offer often on the spot. **Newer 2026 loops insert an eliminatory technical EM round first** (notification-system HLD, DB choice). No DSA was reported in any Round 3+.
+
+### 0.2 Round 2 DSA, ranked by what was actually asked
+
+| Rank | Pattern | Seen | What was asked → where to practise |
+|---|---|---|---|
+| 1 | **Rate limiter / time-window counters, coded as classes** | 5 | Token bucket + fixed window coded, sliding window asked (Z2); simple limiter + sliding window (Z5); orders-in-last-X-minutes with circular buckets and a lock (Z7) → `01b` 12.1, 1.5 |
+| 2 | **Graphs: BFS → Dijkstra, constrained shortest path, topological sort** | 3–4 | Jump Game IV + "each step has a cost" (Z2); constrained shortest path ≈ LC 787 and topo sort with cycles (Z10); topo-order uniqueness (Blinkit B3) → `01b` 3.3–3.5, 12.3, 12.4 |
+| 3 | **Design-a-data-structure for a feature** | 5 | Open-hours index (Z11), Ctrl+R (Z29), browser history (B10), LFU + LRU after Redis talk (Z1) → `01b` 1.x, 12.5–12.7 |
+| 4 | **Trie / string search** | 2 | Ctrl+R; trie over text + longest common substring (N11) → `01b` 1.8, 12.5, 12.8 |
+| 5 | **DP (often hard)** | 2 | Unnamed hard DP with working code (Z1); "implement this library's algorithm, recursion then DP" (Z13) → `01b` 5, 12.9 |
+| 6 | **Heaps / order statistics** | 1 | Dish price between the 1/3 and 2/3 percentiles: sort → two heaps (Z6) → `01b` 1.6, 12.2 |
+| 7 | **Trees / BST** | 2 | BST traversal tested on skewed trees and negatives (N1); BST insert/update/delete + BST vs red-black tree (Z11) → `01b` 2.1–2.3, 12.6 |
+| 8 | **Linked list** | 1–2 | Delete Fibonacci-valued nodes from a DLL, "give 4–5 approaches, then code one" (EM, Z9) → `01b` 12.8 |
+| 9 | **Stack / parentheses** | 1 | Longest valid parentheses *subsequence* (Z5) → `01b` 12.8 |
+| 10 | **Greedy observation** | 1 | Flipping the Matrix (Z2) → `01b` 12.8 |
+| 11 | **Concurrency coding** | 2 | Locks (Z7), goroutines/channels + timeouts (N12) → `01b` 12.10 |
+
+Round 1 (for contrast) is classic LeetCode: DP, graphs/DSU, binary search, sliding window, BST, LRU/LFU. You've passed that; keep it warm, but **shift practice time to the table above**.
+
+### 0.3 The Round 2 problem list (52, tiered)
+
+**Tier 1 — must do (18).** Do all of these, as clean classes, with no IDE.
+
+| # | Problem | Code in `01b` |
+|---|---|---|
+| 1 | **Rate limiter: token bucket, fixed window, sliding log, sliding counter** (thread-safe classes) | 12.1 |
+| 2 | LC 362 Design Hit Counter / orders in the last X minutes (+ lock) | 1.5, 12.1 |
+| 3 | LC 359 Logger Rate Limiter | 12.1 |
+| 4 | LC 146 LRU Cache | 1.1, 1.2 |
+| 5 | LC 460 LFU Cache | 1.3 |
+| 6 | LC 295 Median of a Data Stream + the 1/3–2/3 percentile variant | 1.6, 12.2 |
+| 7 | LC 1345 Jump Game IV + weighted follow-up | 3.5, 12.3 |
+| 8 | LC 743 Network Delay Time (Dijkstra) | 3.4 |
+| 9 | LC 787 Cheapest Flights Within K Stops | 3.4 |
+| 10 | LC 207 / 210 Course Schedule I/II | 3.3 |
+| 11 | LC 444 Sequence Reconstruction (free substitute: LC 2392) | 12.4 |
+| 12 | LC 208 Implement Trie | 1.8 |
+| 13 | LC 1268 Search Suggestions + Ctrl+R | 12.5 |
+| 14 | LC 1472 Design Browser History | 12.6 |
+| 15 | LC 380 Insert Delete GetRandom O(1) | 1.4 |
+| 16 | LC 155 Min Stack → min **and** max in O(1) | 12.6 |
+| 17 | LC 450 Delete Node in BST + LC 701 Insert | 2.1, 12.6 |
+| 18 | "Restaurants open now" index (crosses midnight) | 12.7 |
+
+**Tier 2 — high (20):** LC 547 + 684 (DSU from scratch) · LC 721 Accounts Merge · LC 994 Rotting Oranges · LC 718 longest common substring · LC 1143 LCS + LC 72 Edit Distance · LC 1235 Job Scheduling (hard DP) · LC 300 LIS + 354 · LC 198/213 House Robber + LC 39 · LC 651 4 Keys Keyboard · longest valid parentheses subsequence + LC 32 + LC 1249 · Flipping the Matrix · Fibonacci-node deletion from a DLL · LC 138 + 206 + 25 · LC 94/145 iterative traversals · LC 432 All O`one · LC 981 Time-Based KV Store · LC 1386 Cinema Seats · LC 2958 + 209 → 862 · LC 215 + 703 · flatten nested JSON / paths → YAML.
+
+**Tier 3 — stretch (14):** LC 218 Skyline · bipartite matching (Kuhn) · LC 353 Snake Game · Dijkstra with one optional edge (src + reversed from dst; LC 2203) · LC 1153 · LC 334 (3 approaches) · LC 540 / 162 / 33 · LC 410 · LC 240 · min swaps to sort a permutation · LC 2608 · LC 2812 · LC 2931 · bounded blocking queue (LC 1188; `01b` 12.10).
+
+### 0.4 What Round 2 interviewers push on (follow-ups)
+
+1. **Add weights → change the algorithm.** BFS becomes Dijkstra (Z2). Know *why*: BFS assumes every edge costs the same.
+2. **Optimise the structure.** Sort → two heaps (Z6); scan → trie (Z29); recursion → DP (Z13); "can you optimise the variation?" (N3).
+3. **Several approaches, then pick one.** An EM asked for 4–5 approaches and **praised choosing the readable one over the most optimal** (Z9). Always list 2–3 options with complexity before coding.
+4. **Thread safety.** "What if two threads call this?" Have the lock answer ready for every class (mutex per structure, lock striping, or atomic counters).
+5. **Fixed window → sliding window.** One candidate couldn't finish the sliding window (Z2); know both sliding variants cold.
+6. **Edge-case batteries.** Skewed trees, negative values (N1); "list all the test cases" before coding (B10).
+7. **DSA tied back to systems.** LFU right after Redis eviction policies (Z1); rate-limiter code in the middle of a rate-limiting design (Z2, Z5, Z7).
+
+### 0.5 Why people failed at Round 2+ (and what to do instead)
+
+Nobody in these reports failed for not knowing an algorithm. They failed for:
+- **Shaky trade-off justification** — e.g. MySQL vs PostgreSQL, over-explained instead of admitting limited exposure (Z2, rejected at the next round). → *Say "I don't have production exposure to that trade-off; here's how I'd reason about it."*
+- **Slow pickup of follow-ups** — "needed 2–3 iterations to grasp a follow-up" was called a negative signal (Z2). → *Restate the follow-up in your own words before answering.*
+- **Messy code** (District, Z15) and **unfinished designs** from poor time management (Blinkit, B12). → *Time-box; get a working version first, then improve.*
+- Candidates who **couldn't implement a trie** (Z29) or **missed a 2-minute puzzle** (Z9) **still passed** because their reasoning and communication were strong.
+
+### 0.6 Seven-day Round 2 plan
+
+| Day | DSA (2–3 h) | Design and resume (2 h) |
+|---|---|---|
+| 1 | Rate limiters 12.1 (all four, from memory, with locks) + hit counter + logger | `06` master Parts 0–2; your Myntra rate-limiter/warmup story |
+| 2 | LRU, LFU, LC 380, min/max stack, browser history | `06` Parts 3–5 (DB, caching, Kafka); Redis eviction and hot keys |
+| 3 | Graphs: Jump Game IV + weighted version, Dijkstra, LC 787, topo sort + LC 444 | `07a` Q1–Q3 (food delivery, tracking, dispatch) |
+| 4 | Trie, LC 1268, Ctrl+R; open-hours index; percentile tracker | `07a` Q6–Q7 (notifications, rate limiter); `07b` Q8 payments |
+| 5 | DP: LC 1143, 72, 718, 1235; recursion → memo → table talk track | `07b` Q9–Q10 (seat booking, quick commerce); `07c` Q22 (your projects as HLD) |
+| 6 | Tier 2 mix: DSU, BST insert/delete, LL one-offs, parentheses subsequence, flipping matrix | `07c` LLD (menu, banner, cart, schema, open-now); SQL from `01c` |
+| 7 | Timed mock: 2 problems in 60 min, typed in a plain doc, talking aloud | Mock design (45 min); `08_SD_Revision_Sheet.md`; resume "why X over Y" for every line |
+
+---
+
 ## 1. The hiring process
 
 ### 1.1 The loop (stable from 2023 to 2026)
