@@ -4,7 +4,7 @@
 > Built from research into Zomato's and Eternal's engineering blogs, Swiggy, Blinkit, Zepto, BookMyShow, Uber, DoorDash, Grab, Stripe, Razorpay, Cloudflare and ~100 interview reports. Company facts link to their source; anything not public is marked so — never claim more in the interview.
 > Diagrams are Mermaid and render on GitHub. Report IDs like Z2 or B10 refer to `sources/interview_reports.md`; all research notes with links are in `sources/`.
 
-[← 06f_SD_How_Zomato_Is_Built_and_Final_Exam.md](06f_SD_How_Zomato_Is_Built_and_Final_Exam.md) · [07b_SD_QA_Payments_Booking_and_More.md →](07b_SD_QA_Payments_Booking_and_More.md)
+[← 06_System_Design_Master.md](06_System_Design_Master.md) · [07b_SD_QA_Payments_Booking_and_More.md →](07b_SD_QA_Payments_Booking_and_More.md)
 
 ---
 
@@ -1758,4 +1758,4 @@ A: Edge (CDN/WAF) for IP floods, gateway for per-user and per-endpoint limits, a
 
 ---
 
-[← 06f_SD_How_Zomato_Is_Built_and_Final_Exam.md](06f_SD_How_Zomato_Is_Built_and_Final_Exam.md) · [07b_SD_QA_Payments_Booking_and_More.md →](07b_SD_QA_Payments_Booking_and_More.md)
+[← 06_System_Design_Master.md](06_System_Design_Master.md) · [07b_SD_QA_Payments_Booking_and_More.md →](07b_SD_QA_Payments_Booking_and_More.md)
