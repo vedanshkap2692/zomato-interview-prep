@@ -16,6 +16,8 @@
 | 4 | `04_CS_Fundamentals_From_Zero.md` | Operating systems, DBMS, SQL queries, computer networks and security, each ending with the questions Swiggy asked plus model answers | 4–5 h |
 | 5 | `05_Java_and_Spring_From_Zero.md` | Java for a C++ person, Collections for DSA, OOP in Java, exceptions, JVM/GC, HashMap internals, multithreading, Spring Boot. Ends with a 50-question rapid-fire bank. | 4–5 h |
 | 6 | `06_Resume_Projects_Behavioural_for_Swiggy.md` | Your intro and "Why Swiggy?", every concept on your resume explained from zero, model answers for Myntra/Atlassian/projects, and STAR stories for the behavioural questions Swiggy asks | 3 h |
+| 7 | `07_Java_and_Go_Questions.md` | **Short, for your confirmed round.** The DSA toolkit in Java and Go side by side (including Go's heap), 17 Java and 20 Go questions with answers to say out loud (goroutines, channels, worker pool, context, slices, interfaces), and Java vs Go | 1.5 h |
+| 8 | `08_LLD_15_Minute_Round.md` | **Short, for your confirmed round.** How to use a 15-minute LLD slot minute by minute, the 5 patterns in one table, and 9 likely questions with compact Java (and Go) sketches: stack via array, driver assignment, food cart, Splitwise, parking lot, rate limiter, notifications, follow/unfollow, LRU | 1.5 h + practice |
 
 The older Zomato files in the parent folder go deeper on some topics. Use them only after the Swiggy file on the same topic:
 - `../05_Myntra_Deep_Dive.md` for Myntra
@@ -23,7 +25,18 @@ The older Zomato files in the parent folder go deeper on some topics. Use them o
 
 ---
 
-## What Round 1 will probably be (short version; details in `01`)
+## Your confirmed Round 1 format
+
+> **Coding + problem solving with data structures (PSDS): 45 minutes. LLD: 15 minutes. Questions cover Java and Golang.**
+
+This matches variant 3 below, a DSA + short LLD round. What to do with it:
+- **45 min of PSDS:** probably 1–2 problems. Use `02` for the problems and `07` Part 1 for the Java/Go toolkit.
+- **15 min of LLD:** classes and interfaces, not a full app. Use `08`.
+- **Java and Go concept questions** can come up during either part. Use `07` Parts 2–4.
+
+**If you're short on time, study in this order:** `07` → `08` → `02` (problems P1–P15) → `01` (the question list) → `06` (your intro and Myntra/Atlassian).
+
+## What Round 1 has looked like for others (details in `01`)
 
 There isn't a single fixed format. Recent reports show four variants:
 
