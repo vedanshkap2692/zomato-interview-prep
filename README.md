@@ -25,3 +25,9 @@
 
 
 **Sources:** `sources/` holds the research notes behind 06–07, with a link for every fact: Zomato/Eternal engineering, Indian companies (Swiggy, Blinkit, Zepto, BookMyShow), global companies (Uber, DoorDash, Grab…), payments/rate limiting/caching patterns (Stripe, Razorpay, Cloudflare, Facebook…), and ~100 interview reports, plus `round2_reports.md` (Round 2+ evidence from 81 write-ups).
+
+---
+
+## Swiggy ASDE / SDE-1 Round 1 (new)
+
+See **`swiggy/README.md`**: beginner-level teaching docs built from ~38 real Swiggy interview reports (2021–2026): process and every past question with answers, DSA from zero (31 problems in Java), machine coding/LLD (5 full Java solutions), CS fundamentals, Java & Spring, and resume/behavioural prep for Swiggy.
